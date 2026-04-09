@@ -36,8 +36,14 @@ class Trellis2Worker:
     """Worker for processing Trellis.2 3D reconstruction jobs"""
 
     def __init__(self):
-        self.job_manager = JobManager()
-        self.storage_manager = StorageManager()
+        self.job_manager = JobManager(
+            redis_host=os.environ.get("REDIS_HOST", "localhost"),
+            redis_port=int(os.environ.get("REDIS_PORT", "6379")),
+            storage_root=os.environ.get("STORAGE_ROOT", "storage"),
+        )
+        self.storage_manager = StorageManager(
+            storage_root=os.environ.get("STORAGE_ROOT", "storage"),
+        )
         self.pipeline = None
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
 

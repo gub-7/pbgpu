@@ -9,6 +9,7 @@ Usage:
 """
 
 import logging
+import os
 import time
 import sys
 
@@ -34,8 +35,14 @@ class CanonicalMVWorker:
     """
 
     def __init__(self):
-        self.jm = JobManager()
-        self.sm = StorageManager()
+        self.jm = JobManager(
+            redis_host=os.environ.get("REDIS_HOST", "localhost"),
+            redis_port=int(os.environ.get("REDIS_PORT", "6379")),
+            storage_root=os.environ.get("STORAGE_ROOT", "storage"),
+        )
+        self.sm = StorageManager(
+            storage_root=os.environ.get("STORAGE_ROOT", "storage"),
+        )
 
     def run(self, poll_interval: float = 2.0):
         """
