@@ -69,8 +69,14 @@ MIN_OCCUPIED_VOXELS = 10
 
 # Minimum fraction of views that must see a voxel as foreground.
 # 1.0 = strict intersection (all views must agree).
-# Lower values are more tolerant of segmentation errors.
-DEFAULT_CONSENSUS_RATIO = 1.0
+# Lower values are more tolerant of segmentation errors
+# and AI-generated view misalignment.
+# 0.6 = at least 3 out of 5 views must agree.
+DEFAULT_CONSENSUS_RATIO = 0.6
+
+# Pixels to dilate masks before visual hull projection.
+# Adds tolerance for slight misalignment between AI-generated views.
+DEFAULT_MASK_DILATION = 15
 
 
 # ---------------------------------------------------------------------------
@@ -84,6 +90,7 @@ def compute_visual_hull(
     grid_resolution: int = DEFAULT_GRID_RESOLUTION,
     grid_half_extent: float = DEFAULT_GRID_HALF_EXTENT,
     consensus_ratio: float = DEFAULT_CONSENSUS_RATIO,
+    mask_dilation: int = DEFAULT_MASK_DILATION,
 ) -> Tuple[np.ndarray, np.ndarray, float]:
     """
     Compute the visual hull from silhouette masks and calibrated cameras.
@@ -141,6 +148,15 @@ def compute_visual_hull(
 
         # Ensure binary
         binary_mask = (mask > 127).astype(np.uint8)
+
+        # Dilate mask to add tolerance for AI-generated view misalignment
+        if mask_dilation > 0:
+            kernel = cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE,
+                (mask_dilation * 2 + 1, mask_dilation * 2 + 1),
+            )
+            binary_mask = cv2.dilate(binary_mask, kernel, iterations=1)
+
         h, w = binary_mask.shape[:2]
 
         ext = rig.get_extrinsic(vn)
