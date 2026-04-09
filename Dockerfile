@@ -29,7 +29,7 @@ RUN pip install --no-cache-dir \
     opencv-python-headless \
     scipy \
     scikit-image \
-    rembg
+    "rembg[cpu]"
 
 # Create storage directories
 RUN mkdir -p /storage/uploads /storage/previews /storage/outputs /storage/artifacts /storage/jobs
