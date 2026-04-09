@@ -132,16 +132,16 @@ def look_at(
     forward = forward / forward_norm
 
     # Right direction
-    right = np.cross(forward, up)
+    right = -np.cross(forward, up)
     right_norm = np.linalg.norm(right)
     if right_norm < 1e-10:
         # Forward is parallel to up — use a fallback up vector
         fallback_up = np.array([0.0, 0.0, -1.0], dtype=np.float64)
-        right = np.cross(forward, fallback_up)
+        right = -np.cross(forward, fallback_up)
         right_norm = np.linalg.norm(right)
         if right_norm < 1e-10:
             fallback_up = np.array([1.0, 0.0, 0.0], dtype=np.float64)
-            right = np.cross(forward, fallback_up)
+            right = -np.cross(forward, fallback_up)
             right_norm = np.linalg.norm(right)
     right = right / right_norm
 
@@ -150,10 +150,14 @@ def look_at(
     true_up = true_up / np.linalg.norm(true_up)
 
     # OpenCV convention: X=right, Y=down, Z=forward
-    # So camera_y = -true_up (world up → camera down)
+    # Negating the cross product for right gives correct handedness;
+    # true_up then naturally points world-down, so R[1,:]=true_up gives camera Y=down.
+    # det(R) = -1 (reflection), which is correct for mapping a right-handed
+    # world frame to the OpenCV camera frame.
+
     R = np.eye(3, dtype=np.float64)
     R[0, :] = right       # camera X = right
-    R[1, :] = -true_up    # camera Y = down
+    R[1, :] = true_up     # camera Y = down (true_up points world-down after right negation)
     R[2, :] = forward     # camera Z = forward
 
     # Translation: t = -R @ eye
@@ -802,11 +806,13 @@ def _validate_rig(rig: CameraRig) -> None:
                 f"(max deviation={np.max(np.abs(RtR - identity)):.2e})"
             )
 
-        # Check det(R) = 1 (proper rotation, not reflection)
+        # Check |det(R)| = 1 (orthonormal rotation, det=-1 is expected
+        # because the look_at() maps a right-handed world frame to the
+        # OpenCV camera frame, which requires a reflection)
         det = np.linalg.det(R)
-        if not np.isclose(det, 1.0, atol=1e-6):
+        if not np.isclose(abs(det), 1.0, atol=1e-6):
             raise ValueError(
-                f"Camera '{vn}' rotation determinant is {det:.6f}, expected 1.0"
+                f"Camera '{vn}' rotation determinant is {det:.6f}, expected ±1.0"
             )
 
         # Check positive focal lengths
