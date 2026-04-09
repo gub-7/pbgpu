@@ -71,7 +71,7 @@ MIN_OCCUPIED_VOXELS = 10
 # 1.0 = strict intersection (all views must agree).
 # Lower values are more tolerant of segmentation errors
 # and AI-generated view misalignment.
-# 0.6 = at least 3 out of 5 views must agree.
+# 0.6 = at least 2 out of 3 views must agree.
 DEFAULT_CONSENSUS_RATIO = 0.6
 
 # Pixels to dilate masks before visual hull projection.

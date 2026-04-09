@@ -418,7 +418,7 @@ class CameraRig:
             }
 
         return {
-            "rig_type": "canonical_5view",
+            "rig_type": "canonical_3view",
             "cameras": cameras_serialized,
             "shared_params": self.shared_params,
             "refinement": self.refinement,
@@ -453,7 +453,7 @@ def build_canonical_rig(
     sensor_width_mm: float = DEFAULT_SENSOR_WIDTH_MM,
 ) -> CameraRig:
     """
-    Build the canonical 5-view camera rig from configuration.
+    Build the canonical 3-view camera rig from configuration.
 
     Each camera is placed on a sphere at the configured distance,
     looking at the origin. All cameras share the same focal length
@@ -465,7 +465,7 @@ def build_canonical_rig(
         sensor_width_mm: Sensor width in mm for focal length conversion.
 
     Returns:
-        CameraRig with all 5 cameras configured.
+        CameraRig with all 3 cameras configured.
     """
     image_width, image_height = image_size
 
@@ -530,7 +530,7 @@ def refine_rig_from_silhouettes(
     from the preprocessing stage.
 
     Strategy:
-        1. For each side view (front, back, left, right), compute the
+        1. For each side view (front, side), compute the
            observed bounding-box-to-image ratio from preprocess metrics.
         2. Compare the median observed ratio to the expected ratio.
         3. Adjust the shared camera distance so the projected size
@@ -557,7 +557,7 @@ def refine_rig_from_silhouettes(
         return rig
 
     # Collect observed bbox ratios for side views only
-    side_views = ["front", "back", "left", "right"]
+    side_views = ["front", "side"]
     observed_ratios = []
 
     for vn in side_views:
@@ -762,7 +762,7 @@ def _validate_rig(rig: CameraRig) -> None:
     Run sanity checks on the camera rig.
 
     Checks:
-        - All 5 views are present
+        - All 3 views are present
         - Extrinsic matrices are valid (orthogonal rotation, finite values)
         - Intrinsic matrices have positive focal lengths
         - Camera positions are at expected distances from origin

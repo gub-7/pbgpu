@@ -1,7 +1,7 @@
 """
 Storage management for uploads, previews, artifacts, and outputs.
 
-Supports both single-view (legacy) and multi-view canonical 5-view
+Supports both single-view (legacy) and multi-view canonical 3-view
 reconstruction pipelines.
 
 Multi-view storage layout per job:
@@ -27,7 +27,7 @@ from datetime import datetime
 
 
 # Canonical view names (must match ViewName enum values)
-_CANONICAL_VIEWS = ("front", "back", "left", "right", "top")
+_CANONICAL_VIEWS = ("front", "side", "top")
 
 # Preview sub-stages for multi-view jobs
 _PREVIEW_SUBSTAGES = ("raw", "segmented", "normalized")
@@ -139,7 +139,7 @@ class StorageManager:
 
         Args:
             job_id: Job identifier.
-            view_name: One of front/back/left/right/top.
+            view_name: One of front/side/top.
             content: Raw image bytes.
             extension: File extension (default .png).
 
@@ -171,7 +171,7 @@ class StorageManager:
         """
         Return the list of view names that have been uploaded for a job.
 
-        E.g. ["front", "back", "left", "right", "top"]
+        E.g. ["front", "side", "top"]
         """
         views_dir = self.uploads_dir / job_id / "views"
         if not views_dir.exists():

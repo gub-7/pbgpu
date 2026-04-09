@@ -2,7 +2,7 @@
 Pydantic models for API request/response validation
 
 Supports both single-view (TripoSR / Trellis2) and multi-view
-canonical 5-view reconstruction pipelines.
+canonical 3-view reconstruction pipelines.
 """
 
 from pydantic import BaseModel, Field
@@ -34,7 +34,7 @@ class PipelineEnum(str, Enum):
     """
     Available reconstruction pipelines.
 
-    Multi-view pipelines consume 5 canonical views (front/back/left/right/top).
+    Multi-view pipelines consume 3 canonical views (front/side/top).
     Single-view pipelines consume a single image.
     """
     # Multi-view pipelines
@@ -49,13 +49,11 @@ class PipelineEnum(str, Enum):
 class ViewName(str, Enum):
     """Canonical view identifiers for multi-view input"""
     FRONT = "front"
-    BACK = "back"
-    LEFT = "left"
-    RIGHT = "right"
+    SIDE = "side"
     TOP = "top"
 
 
-# The 5 required canonical views
+# The 3 required canonical views
 REQUIRED_VIEWS: List[str] = [v.value for v in ViewName]
 
 

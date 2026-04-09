@@ -4,6 +4,11 @@ Configuration for the canonical multi-view reconstruction pipeline.
 Centralizes all default parameters, stage ordering, and camera rig
 definitions so that the orchestrator and individual stages can share
 a single source of truth.
+
+3-view setup:
+    - front: perpendicular, centered (camera on +Z axis)
+    - side:  perpendicular from the right (camera on +X axis)
+    - top:   bird's-eye looking straight down (camera on +Y axis)
 """
 
 from dataclasses import dataclass, field
@@ -33,17 +38,15 @@ class CameraSpec:
         return math.radians(self.pitch_deg)
 
 
-# Fixed canonical camera rig for 5 views
+# Fixed canonical camera rig for 3 views
 CANONICAL_CAMERAS: Dict[str, CameraSpec] = {
     "front": CameraSpec(view_name="front", yaw_deg=0.0, pitch_deg=0.0),
-    "right": CameraSpec(view_name="right", yaw_deg=90.0, pitch_deg=0.0),
-    "back":  CameraSpec(view_name="back",  yaw_deg=180.0, pitch_deg=0.0),
-    "left":  CameraSpec(view_name="left",  yaw_deg=270.0, pitch_deg=0.0),
+    "side":  CameraSpec(view_name="side",  yaw_deg=90.0, pitch_deg=0.0),
     "top":   CameraSpec(view_name="top",   yaw_deg=0.0, pitch_deg=-90.0),
 }
 
 # Canonical view names in processing order
-CANONICAL_VIEW_ORDER: List[str] = ["front", "back", "left", "right", "top"]
+CANONICAL_VIEW_ORDER: List[str] = ["front", "side", "top"]
 
 
 # ---------------------------------------------------------------------------

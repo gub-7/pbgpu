@@ -2,7 +2,7 @@
 Job queue and state management for 3D reconstruction tasks.
 
 Uses Redis for job queue and file-based storage for job metadata.
-Supports both single-view (legacy) and multi-view canonical 5-view
+Supports both single-view (legacy) and multi-view canonical 3-view
 reconstruction pipelines.
 """
 

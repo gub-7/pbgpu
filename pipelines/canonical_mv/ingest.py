@@ -2,7 +2,7 @@
 Ingest stage for the canonical multi-view pipeline.
 
 Responsibilities:
-    - Verify all 5 canonical view files are present and readable
+    - Verify all 3 canonical view files are present and readable
     - Read basic image metadata (dimensions, file size)
     - Generate raw preview thumbnails for each view
     - Update per-view metadata in job state

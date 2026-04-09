@@ -2,7 +2,7 @@
 FastAPI application for GPU-cluster 3D reconstruction service.
 
 Supports both single-view (TripoSR / Trellis2) and multi-view
-canonical 5-view reconstruction pipelines.
+canonical 3-view reconstruction pipelines.
 """
 
 import asyncio
@@ -157,15 +157,11 @@ CATEGORY_GUIDANCE = {
 # Background preprocessing trigger (single-view legacy)
 # ---------------------------------------------------------------------------
 
+
 async def trigger_preprocessing(
     job_id: str, category: CategoryEnum, model: ModelEnum
 ):
-    """
-    Trigger preprocessing for a single-view job in the background.
-
-    Runs segmentation + framing, generates previews, then queues the
-    job for the appropriate model worker.
-    """
+    """Trigger preprocessing for a single-view job in the background."""
     try:
         job_manager.update_job(job_id, status=JobStatus.PREPROCESSING, progress=5)
 
@@ -195,8 +191,6 @@ async def trigger_preprocessing(
         )
 
         job_manager.update_job(job_id, progress=30)
-
-        # Queue for model generation
         job_manager.queue_job_for_generation(job_id)
         job_manager.update_job(job_id, status=JobStatus.GENERATING, progress=35)
 
@@ -212,8 +206,9 @@ async def trigger_preprocessing(
 
 
 # ===================================================================
-# ENDPOINTS: Single-view (legacy, backward-compatible)
+# ENDPOINTS: Single-view (legacy)
 # ===================================================================
+
 
 @app.post("/api/upload", response_model=UploadResponse)
 async def upload_image(
@@ -222,19 +217,15 @@ async def upload_image(
     model: str = Form("triposr"),
     params: str = Form("{}"),
 ):
-    """
-    Upload a single image for 3D reconstruction (legacy endpoint).
-    """
+    """Upload a single image for 3D reconstruction (legacy endpoint)."""
     try:
         cat = CategoryEnum(category)
     except ValueError:
         raise HTTPException(400, f"Invalid category: {category}")
-
     try:
         mdl = ModelEnum(model)
     except ValueError:
         raise HTTPException(400, f"Invalid model: {model}")
-
     try:
         params_dict = json.loads(params)
     except json.JSONDecodeError:
@@ -246,7 +237,6 @@ async def upload_image(
 
     job_id = job_manager.create_job(cat, mdl, params_dict)
     storage_manager.save_upload(job_id, file.filename or "input.png", content)
-
     asyncio.create_task(trigger_preprocessing(job_id, cat, mdl))
 
     return UploadResponse(
@@ -257,38 +247,33 @@ async def upload_image(
 
 
 # ===================================================================
-# ENDPOINTS: Multi-view canonical 5-view upload
+# ENDPOINTS: Multi-view canonical 3-view upload
 # ===================================================================
+
 
 @app.post("/api/upload_multiview", response_model=MultiViewUploadResponse)
 async def upload_multiview(
     front: UploadFile = File(...),
-    back: UploadFile = File(...),
-    left: UploadFile = File(...),
-    right: UploadFile = File(...),
+    side: UploadFile = File(...),
     top: UploadFile = File(...),
     category: str = Form(...),
     pipeline: str = Form("canonical_mv_hybrid"),
     params: str = Form("{}"),
 ):
     """
-    Upload 5 canonical view images for multi-view 3D reconstruction.
+    Upload 3 canonical view images for multi-view 3D reconstruction.
 
-    Requires: front, back, left, right, top images.
+    Requires: front, side, top images.
     """
-    # Validate category
     try:
         cat = CategoryEnum(category)
     except ValueError:
         raise HTTPException(400, f"Invalid category: {category}")
-
-    # Validate pipeline
     try:
         pipe = PipelineEnum(pipeline)
     except ValueError:
         raise HTTPException(400, f"Invalid pipeline: {pipeline}")
 
-    # Ensure it's a multi-view pipeline
     mv_pipelines = {
         PipelineEnum.CANONICAL_MV_HYBRID,
         PipelineEnum.CANONICAL_MV_FAST,
@@ -301,32 +286,26 @@ async def upload_multiview(
             f"Use one of: {[p.value for p in mv_pipelines]}",
         )
 
-    # Parse params
     try:
         params_dict = json.loads(params)
     except json.JSONDecodeError:
         raise HTTPException(400, "Invalid params JSON")
 
-    # Validate params against CanonicalMVParams schema
     try:
         mv_params = CanonicalMVParams(**params_dict)
         params_dict = mv_params.model_dump()
     except Exception as e:
         raise HTTPException(400, f"Invalid multi-view params: {e}")
 
-    # Read and validate each view image
     view_files = {
         ViewName.FRONT.value: front,
-        ViewName.BACK.value: back,
-        ViewName.LEFT.value: left,
-        ViewName.RIGHT.value: right,
+        ViewName.SIDE.value: side,
         ViewName.TOP.value: top,
     }
 
-    max_size = 50 * 1024 * 1024  # 50 MB per image
+    max_size = 50 * 1024 * 1024
     views_received = []
 
-    # Create the job first to get an ID for storage
     job_id = job_manager.create_multiview_job(
         category=cat,
         pipeline=pipe,
@@ -338,17 +317,10 @@ async def upload_multiview(
         for view_name, upload_file in view_files.items():
             content = await upload_file.read()
             if len(content) > max_size:
-                raise HTTPException(
-                    400,
-                    f"View '{view_name}' file too large (max 50MB)",
-                )
+                raise HTTPException(400, f"View '{view_name}' file too large (max 50MB)")
             if len(content) == 0:
-                raise HTTPException(
-                    400,
-                    f"View '{view_name}' file is empty",
-                )
+                raise HTTPException(400, f"View '{view_name}' file is empty")
 
-            # Determine extension from filename
             original_name = upload_file.filename or f"{view_name}.png"
             ext = Path(original_name).suffix.lower()
             if ext not in (".png", ".jpg", ".jpeg", ".webp"):
@@ -357,7 +329,6 @@ async def upload_multiview(
             storage_manager.save_view_upload(job_id, view_name, content, ext)
             views_received.append(view_name)
 
-            # Update per-view metadata with file info
             job_manager.update_job(
                 job_id,
                 view_updates={
@@ -370,14 +341,12 @@ async def upload_multiview(
             )
 
     except HTTPException:
-        # Clean up on validation failure
         job_manager.delete_job(job_id)
         raise
     except Exception as e:
         job_manager.delete_job(job_id)
         raise HTTPException(500, f"Failed to save views: {e}")
 
-    # Queue the job for the multi-view worker
     job_manager.queue_job_for_generation(job_id)
 
     logger.info(
@@ -398,13 +367,10 @@ async def upload_multiview(
 # ENDPOINTS: Job status & management
 # ===================================================================
 
+
 @app.get("/api/job/{job_id}/status", response_model=JobStatusResponse)
 async def get_job_status(job_id: str):
-    """
-    Get job status, progress, stages, and available artifacts.
-
-    Works for both single-view and multi-view jobs.
-    """
+    """Get job status, progress, stages, and available artifacts."""
     job_data = job_manager.get_job(job_id)
     if not job_data:
         raise HTTPException(404, "Job not found")
@@ -414,11 +380,7 @@ async def get_job_status(job_id: str):
         status=JobStatus(job_data["status"]),
         model=ModelEnum(job_data["model"]) if job_data.get("model") else None,
         category=CategoryEnum(job_data["category"]),
-        pipeline=(
-            PipelineEnum(job_data["pipeline"])
-            if job_data.get("pipeline")
-            else None
-        ),
+        pipeline=PipelineEnum(job_data["pipeline"]) if job_data.get("pipeline") else None,
         progress=job_data.get("progress", 0),
         current_stage=job_data.get("current_stage"),
         stage_progress=job_data.get("stage_progress"),
@@ -427,16 +389,8 @@ async def get_job_status(job_id: str):
         warnings=job_data.get("warnings", []),
         artifacts_available=job_data.get("artifacts_available", []),
         created_at=datetime.fromisoformat(job_data["created_at"]),
-        started_at=(
-            datetime.fromisoformat(job_data["started_at"])
-            if job_data.get("started_at")
-            else None
-        ),
-        completed_at=(
-            datetime.fromisoformat(job_data["completed_at"])
-            if job_data.get("completed_at")
-            else None
-        ),
+        started_at=datetime.fromisoformat(job_data["started_at"]) if job_data.get("started_at") else None,
+        completed_at=datetime.fromisoformat(job_data["completed_at"]) if job_data.get("completed_at") else None,
         error=job_data.get("error"),
         output_url=job_data.get("output_url"),
     )
@@ -448,7 +402,6 @@ async def delete_job(job_id: str):
     job_data = job_manager.get_job(job_id)
     if not job_data:
         raise HTTPException(404, "Job not found")
-
     job_manager.delete_job(job_id)
     return {"status": "deleted", "job_id": job_id}
 
@@ -457,23 +410,16 @@ async def delete_job(job_id: str):
 # ENDPOINTS: Previews
 # ===================================================================
 
+
 @app.get("/api/job/{job_id}/previews")
 async def get_job_previews(job_id: str):
-    """
-    Get preview images for a job.
-
-    For single-view jobs, returns a flat list of preview stages.
-    For multi-view jobs, returns previews organized by view and substage.
-    """
+    """Get preview images for a job."""
     job_data = job_manager.get_job(job_id)
     if not job_data:
         raise HTTPException(404, "Job not found")
 
-    # Check if multi-view
     if job_data.get("views") is not None:
-        # Multi-view: return per-view previews
         view_previews = storage_manager.list_view_previews(job_id)
-
         result: dict = {"job_id": job_id, "views": {}}
         for substage, views in view_previews.items():
             for view_name, filename in views.items():
@@ -484,10 +430,8 @@ async def get_job_previews(job_id: str):
                     "filename": filename,
                     "url": f"/api/job/{job_id}/preview/{substage}/{view_name}",
                 })
-
         return JSONResponse(content=result)
 
-    # Single-view: legacy preview list
     preview_dir = storage_manager.get_job_preview_dir(job_id)
     if not preview_dir.exists():
         return PreviewResponse(job_id=job_id, previews=[])
@@ -496,160 +440,111 @@ async def get_job_previews(job_id: str):
     for p in sorted(preview_dir.iterdir()):
         if p.is_file() and p.suffix.lower() in (".png", ".jpg", ".jpeg"):
             from PIL import Image as PILImage
-
             try:
                 img = PILImage.open(p)
                 size = {"width": img.width, "height": img.height}
             except Exception:
                 size = {"width": 0, "height": 0}
-
             previews.append(
                 PreviewStage(
-                    stage=p.stem,
-                    filename=p.name,
+                    stage=p.stem, filename=p.name,
                     url=f"/api/job/{job_id}/preview/{p.name}",
                     timestamp=datetime.fromtimestamp(p.stat().st_mtime),
                     size=size,
                 )
             )
-
     return PreviewResponse(job_id=job_id, previews=previews)
 
 
 @app.get("/api/job/{job_id}/preview/{filename:path}")
 async def get_preview_file(job_id: str, filename: str):
-    """
-    Serve a preview image file.
-
-    Supports both:
-    - /api/job/{id}/preview/stage_name.png  (single-view)
-    - /api/job/{id}/preview/{substage}/{view_name}  (multi-view)
-    """
+    """Serve a preview image file."""
     job_data = job_manager.get_job(job_id)
     if not job_data:
         raise HTTPException(404, "Job not found")
 
-    # Try multi-view path: substage/view_name
     parts = filename.split("/")
     if len(parts) == 2:
         substage, view_name = parts
         path = storage_manager.get_view_preview_path(job_id, substage, view_name)
         if path and path.exists():
-            return FileResponse(
-                path,
-                media_type=StorageManager.content_type_for(path.name),
-            )
+            return FileResponse(path, media_type=StorageManager.content_type_for(path.name))
 
-    # Try single-view path
     preview_path = storage_manager.get_preview_path(job_id, filename)
     if preview_path.exists():
-        return FileResponse(
-            preview_path,
-            media_type=StorageManager.content_type_for(filename),
-        )
+        return FileResponse(preview_path, media_type=StorageManager.content_type_for(filename))
 
     raise HTTPException(404, "Preview not found")
 
 
 # ===================================================================
-# ENDPOINTS: Artifacts (multi-view and general)
+# ENDPOINTS: Artifacts
 # ===================================================================
+
 
 @app.get("/api/job/{job_id}/artifacts", response_model=ArtifactListResponse)
 async def get_job_artifacts(job_id: str):
-    """
-    List all available artifacts for a job.
-
-    Returns metadata about each artifact (name, filename, size, type).
-    """
+    """List all available artifacts for a job."""
     job_data = job_manager.get_job(job_id)
     if not job_data:
         raise HTTPException(404, "Job not found")
 
     raw_artifacts = storage_manager.list_artifacts(job_id)
-
     artifacts = []
     for a in raw_artifacts:
-        # Infer stage from filename
         stage = _infer_stage_from_artifact(a["filename"])
         artifacts.append(
             ArtifactInfo(
-                name=a["name"],
-                stage=stage,
-                filename=a["filename"],
+                name=a["name"], stage=stage, filename=a["filename"],
                 url=f"/api/job/{job_id}/download/{a['filename']}",
-                file_size=a.get("file_size"),
-                content_type=a.get("content_type"),
-                created_at=(
-                    datetime.fromisoformat(a["created_at"])
-                    if a.get("created_at")
-                    else None
-                ),
+                file_size=a.get("file_size"), content_type=a.get("content_type"),
+                created_at=datetime.fromisoformat(a["created_at"]) if a.get("created_at") else None,
             )
         )
-
     return ArtifactListResponse(job_id=job_id, artifacts=artifacts)
 
 
 @app.get("/api/job/{job_id}/download/{artifact_path:path}")
 async def download_artifact(job_id: str, artifact_path: str):
-    """
-    Download a specific artifact file.
-
-    The artifact_path is relative to the job's artifact directory.
-    E.g.: camera_init.json, coarse_mesh.glb, textures/diffuse.png
-    """
+    """Download a specific artifact file."""
     job_data = job_manager.get_job(job_id)
     if not job_data:
         raise HTTPException(404, "Job not found")
 
     filepath = storage_manager.get_artifact_path(job_id, artifact_path)
     if not filepath:
-        # Also check outputs dir for final.glb
         output_file = storage_manager.get_output_file(job_id)
         if output_file and output_file.name == artifact_path:
             filepath = output_file
         else:
             raise HTTPException(404, f"Artifact not found: {artifact_path}")
 
-    return FileResponse(
-        filepath,
-        media_type=StorageManager.content_type_for(filepath.name),
-        filename=filepath.name,
-    )
+    return FileResponse(filepath, media_type=StorageManager.content_type_for(filepath.name), filename=filepath.name)
 
 
 # ===================================================================
 # ENDPOINTS: Metrics / QA
 # ===================================================================
 
+
 @app.get("/api/job/{job_id}/metrics", response_model=MetricsResponse)
 async def get_job_metrics(job_id: str):
-    """
-    Get QA metrics for a job.
-
-    Returns quality scores, per-view metrics, mesh metrics,
-    warnings, and retry recommendations.
-    """
+    """Get QA metrics for a job."""
     job_data = job_manager.get_job(job_id)
     if not job_data:
         raise HTTPException(404, "Job not found")
 
     metrics = storage_manager.load_metrics(job_id)
     if not metrics:
-        # Return empty metrics if not yet available
         return MetricsResponse(job_id=job_id)
 
-    # Parse warnings into QAWarning objects
     raw_warnings = metrics.get("warnings", [])
     warnings = []
     for w in raw_warnings:
         if isinstance(w, dict):
             warnings.append(QAWarning(**w))
         elif isinstance(w, str):
-            warnings.append(
-                QAWarning(code=w, message=w, severity="warning")
-            )
+            warnings.append(QAWarning(code=w, message=w, severity="warning"))
 
     return MetricsResponse(
         job_id=job_id,
@@ -666,30 +561,21 @@ async def get_job_metrics(job_id: str):
 # ENDPOINTS: Stage rerun
 # ===================================================================
 
+
 @app.post("/api/job/{job_id}/rerun_stage")
 async def rerun_stage(job_id: str, stage: str = Form(...)):
-    """
-    Request a stage re-run for a multi-view job.
-
-    Resets the specified stage (and all subsequent stages) to PENDING,
-    and re-queues the job for processing.
-    """
+    """Request a stage re-run for a multi-view job."""
     job_data = job_manager.get_job(job_id)
     if not job_data:
         raise HTTPException(404, "Job not found")
-
     if not job_data.get("pipeline"):
-        raise HTTPException(
-            400, "Stage rerun is only supported for multi-view jobs"
-        )
+        raise HTTPException(400, "Stage rerun is only supported for multi-view jobs")
 
     stages = job_data.get("stages", {})
     if stage not in stages:
         raise HTTPException(400, f"Unknown stage: {stage}")
 
-    # Reset this stage and all subsequent stages to PENDING
     from .models import MV_STAGE_ORDER
-
     found = False
     reset_stages = {}
     for s in MV_STAGE_ORDER:
@@ -699,28 +585,18 @@ async def rerun_stage(job_id: str, stage: str = Form(...)):
             reset_stages[s] = StageStatus.PENDING.value
 
     job_manager.update_job(
-        job_id,
-        status=JobStatus.QUEUED,
-        stage_updates=reset_stages,
-        current_stage=stage,
-        stage_progress=0.0,
-        error=None,
+        job_id, status=JobStatus.QUEUED, stage_updates=reset_stages,
+        current_stage=stage, stage_progress=0.0, error=None,
     )
-
-    # Re-queue
     job_manager.queue_job_for_generation(job_id)
 
-    return {
-        "status": "requeued",
-        "job_id": job_id,
-        "rerun_from": stage,
-        "stages_reset": list(reset_stages.keys()),
-    }
+    return {"status": "requeued", "job_id": job_id, "rerun_from": stage, "stages_reset": list(reset_stages.keys())}
 
 
 # ===================================================================
 # ENDPOINTS: Output download
 # ===================================================================
+
 
 @app.get("/api/job/{job_id}/output")
 async def get_output(job_id: str):
@@ -728,31 +604,23 @@ async def get_output(job_id: str):
     job_data = job_manager.get_job(job_id)
     if not job_data:
         raise HTTPException(404, "Job not found")
-
     if job_data["status"] != JobStatus.COMPLETED.value:
         raise HTTPException(400, "Job not yet completed")
-
     output_file = storage_manager.get_output_file(job_id)
     if not output_file:
         raise HTTPException(404, "Output file not found")
-
-    return FileResponse(
-        output_file,
-        media_type="model/gltf-binary",
-        filename=output_file.name,
-    )
+    return FileResponse(output_file, media_type="model/gltf-binary", filename=output_file.name)
 
 
 # ===================================================================
 # ENDPOINTS: Categories & health
 # ===================================================================
 
+
 @app.get("/api/categories", response_model=CategoriesResponse)
 async def get_categories():
     """Get available categories with guidance."""
-    return CategoriesResponse(
-        categories=list(CATEGORY_GUIDANCE.values())
-    )
+    return CategoriesResponse(categories=list(CATEGORY_GUIDANCE.values()))
 
 
 @app.get("/api/health")
@@ -763,7 +631,6 @@ async def health_check():
         redis_ok = True
     except Exception:
         redis_ok = False
-
     return {
         "status": "healthy" if redis_ok else "degraded",
         "redis": "connected" if redis_ok else "disconnected",
@@ -776,18 +643,11 @@ async def health_check():
 async def queue_status():
     """Get queue lengths for all models and pipelines."""
     from .models import PipelineEnum as PE
-
-    result = {
-        "single_view": {},
-        "multi_view": {},
-    }
-
+    result = {"single_view": {}, "multi_view": {}}
     for model in ModelEnum:
         result["single_view"][model.value] = job_manager.get_queue_length(model)
-
     for pipe in [PE.CANONICAL_MV_HYBRID, PE.CANONICAL_MV_FAST, PE.CANONICAL_MV_GENERATIVE]:
         result["multi_view"][pipe.value] = job_manager.get_multiview_queue_length(pipe)
-
     return result
 
 
@@ -795,7 +655,6 @@ async def queue_status():
 # Helpers
 # ---------------------------------------------------------------------------
 
-# Mapping from artifact filename patterns to pipeline stages
 _ARTIFACT_STAGE_MAP = {
     "camera_init": "initialize_cameras",
     "coarse_gaussians": "reconstruct_coarse",
@@ -810,20 +669,13 @@ _ARTIFACT_STAGE_MAP = {
 
 
 def _infer_stage_from_artifact(filename: str) -> str:
-    """
-    Infer the pipeline stage that produced an artifact from its filename.
-    """
+    """Infer the pipeline stage that produced an artifact from its filename."""
     stem = Path(filename).stem.lower()
     for pattern, stage in _ARTIFACT_STAGE_MAP.items():
         if pattern in stem:
             return stage
-
-    # Check parent directory
     parts = Path(filename).parts
-    if len(parts) > 1:
-        parent = parts[0].lower()
-        if parent == "textures":
-            return "bake_texture"
-
+    if len(parts) > 1 and parts[0].lower() == "textures":
+        return "bake_texture"
     return "unknown"
 

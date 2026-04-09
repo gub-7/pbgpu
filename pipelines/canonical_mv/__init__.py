@@ -1,5 +1,5 @@
 """
-Canonical 5-view multi-view reconstruction pipeline.
+Canonical 3-view multi-view reconstruction pipeline.
 
 Stages (in order):
     1. ingest           - validate uploaded views and create raw previews
