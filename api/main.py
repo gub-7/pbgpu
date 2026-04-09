@@ -594,6 +594,86 @@ async def rerun_stage(job_id: str, stage: str = Form(...)):
 
 
 # ===================================================================
+# ENDPOINTS: Camera calibration (fast preview)
+# ===================================================================
+
+
+@app.post("/api/job/{job_id}/calibrate_cameras")
+async def calibrate_cameras(job_id: str, body: dict):
+    """
+    Run a fast camera calibration preview.
+
+    Accepts camera parameter overrides and returns a visual hull
+    preview image plus per-view depth maps and mask overlays,
+    all as base64-encoded PNGs.
+
+    Body JSON::
+
+        {
+            "cameras": {
+                "front": {"yaw_deg": 0, "pitch_deg": 0, "distance": 2.5, "focal_length": 50},
+                "side":  {"yaw_deg": 90, "pitch_deg": 0, "distance": 2.5, "focal_length": 50},
+                "top":   {"yaw_deg": 0, "pitch_deg": -90, "distance": 2.5, "focal_length": 50}
+            },
+            "top_up_hint": [-1, 0, 0],
+            "grid_resolution": 64,
+            "consensus_ratio": 0.6,
+            "mask_dilation": 15
+        }
+    """
+    import base64
+
+    job_data = job_manager.get_job(job_id)
+    if not job_data:
+        raise HTTPException(404, "Job not found")
+
+    camera_overrides = body.get("cameras", {})
+    top_up_hint = body.get("top_up_hint", None)
+    grid_resolution = int(body.get("grid_resolution", 64))
+    consensus_ratio = float(body.get("consensus_ratio", 0.6))
+    mask_dilation = int(body.get("mask_dilation", 15))
+
+    # Clamp grid resolution for speed
+    grid_resolution = max(32, min(grid_resolution, 192))
+
+    try:
+        from pipelines.canonical_mv.calibrate import run_calibration_preview
+
+        result = run_calibration_preview(
+            job_id=job_id,
+            sm=storage_manager,
+            camera_overrides=camera_overrides,
+            top_up_hint=top_up_hint,
+            grid_resolution=grid_resolution,
+            consensus_ratio=consensus_ratio,
+            mask_dilation=mask_dilation,
+        )
+
+        # Encode images as base64
+        response = {
+            "preview": base64.b64encode(result["preview_png"]).decode("ascii"),
+            "depth_maps": {
+                vn: base64.b64encode(png).decode("ascii")
+                for vn, png in result["depth_pngs"].items()
+            },
+            "overlays": {
+                vn: base64.b64encode(png).decode("ascii")
+                for vn, png in result["overlay_pngs"].items()
+            },
+            "n_occupied": result["n_occupied"],
+            "occupancy_pct": result["occupancy_pct"],
+        }
+
+        return JSONResponse(content=response)
+
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        logger.error(f"Calibration failed for job {job_id}: {e}", exc_info=True)
+        raise HTTPException(500, f"Calibration failed: {e}")
+
+
+# ===================================================================
 # ENDPOINTS: Output download
 # ===================================================================
 
