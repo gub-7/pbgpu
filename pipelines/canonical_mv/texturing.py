@@ -668,6 +668,7 @@ def run_bake_texture(
             "camera_init.json not found — initialize_cameras must run first"
         )
     rig = CameraRig.from_dict(rig_data)
+    image_size = tuple(rig.shared_params["image_size"])
     jm.update_job(job_id, stage_progress=0.05)
 
     # ------------------------------------------------------------------
@@ -700,7 +701,7 @@ def run_bake_texture(
     # ------------------------------------------------------------------
     # Step 3: Load segmented images and masks
     # ------------------------------------------------------------------
-    masks_dict, images_dict = _load_segmented_views(job_id, sm)
+    masks_dict, images_dict = _load_segmented_views(job_id, sm, target_size=image_size)
     logger.info(
         f"[{job_id}] bake_texture: loaded {len(images_dict)} view images"
     )
@@ -773,8 +774,16 @@ def run_bake_texture(
 def _load_segmented_views(
     job_id: str,
     sm: StorageManager,
+    target_size: Optional[Tuple[int, int]] = None,
 ) -> Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray]]:
-    """Load segmented view masks and RGB images."""
+    """Load segmented view masks and RGB images.
+
+    Args:
+        job_id: Job identifier.
+        sm: Storage manager.
+        target_size: Optional (width, height) to resize loaded images to.
+                     Should match the camera rig image_size.
+    """
     from .coarse_recon import _load_segmented_views as _load
-    return _load(job_id, sm)
+    return _load(job_id, sm, target_size=target_size)
 

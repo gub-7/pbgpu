@@ -866,7 +866,7 @@ def run_reconstruct_coarse(
     # ------------------------------------------------------------------
     # Step 2: Load segmented masks
     # ------------------------------------------------------------------
-    masks, images = _load_segmented_views(job_id, sm)
+    masks, images = _load_segmented_views(job_id, sm, target_size=image_size)
     if len(masks) < 3:
         raise ValueError(
             f"Only {len(masks)} segmented views found, need at least 3 "
@@ -1024,9 +1024,23 @@ def run_reconstruct_coarse(
 def _load_segmented_views(
     job_id: str,
     sm: StorageManager,
+    target_size: Optional[Tuple[int, int]] = None,
 ) -> Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray]]:
     """
     Load segmented view masks and RGB images from the preprocess stage.
+
+    Preview images are stored as thumbnails (max 512px) but the camera
+    rig intrinsics are built for the full canvas size (e.g. 1024×1024).
+    When ``target_size`` is provided, all loaded images and masks are
+    resized to match so that pixel coordinates from the camera projection
+    align correctly with the image data.
+
+    Args:
+        job_id: Job identifier.
+        sm: Storage manager for loading artifacts.
+        target_size: Optional (width, height) to resize all loaded images
+                     to.  Should match the camera rig's image_size so that
+                     intrinsic projections land on the correct pixels.
 
     Returns:
         Tuple of (masks_dict, images_dict) where:
@@ -1047,6 +1061,14 @@ def _load_segmented_views(
             continue
 
         img = Image.open(path)
+
+        # Resize to target dimensions before converting to numpy so that
+        # mask/image pixel coordinates match the camera intrinsics.
+        if target_size is not None:
+            tw, th = target_size
+            if img.size != (tw, th):
+                img = img.resize((tw, th), Image.Resampling.LANCZOS)
+
         if img.mode == "RGBA":
             rgba = np.array(img)
             masks[vn] = rgba[:, :, 3]

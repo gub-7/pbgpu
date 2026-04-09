@@ -1264,7 +1264,7 @@ def run_refine_joint(
     # ------------------------------------------------------------------
     # Step 4: Load segmented masks and images
     # ------------------------------------------------------------------
-    masks, images = _load_segmented_views(job_id, sm)
+    masks, images = _load_segmented_views(job_id, sm, target_size=image_size)
     if len(masks) < 3:
         raise ValueError(
             f"Only {len(masks)} segmented views found, need at least 3 "
@@ -1362,14 +1362,21 @@ def run_refine_joint(
 def _load_segmented_views(
     job_id: str,
     sm: StorageManager,
+    target_size: Optional[Tuple[int, int]] = None,
 ) -> Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray]]:
     """
     Load segmented view masks and RGB images from the preprocess stage.
+
+    Args:
+        job_id: Job identifier.
+        sm: Storage manager.
+        target_size: Optional (width, height) to resize loaded images to.
+                     Should match the camera rig image_size.
 
     Returns:
         Tuple of (masks_dict, images_dict).
     """
     # Reuse the loader from coarse_recon
     from .coarse_recon import _load_segmented_views as _load
-    return _load(job_id, sm)
+    return _load(job_id, sm, target_size=target_size)
 
