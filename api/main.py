@@ -7,6 +7,7 @@ canonical 5-view reconstruction pipelines.
 
 import asyncio
 import json
+import os
 import logging
 from datetime import datetime
 from pathlib import Path
@@ -64,8 +65,14 @@ app.add_middleware(
 )
 
 # Service instances
-job_manager = JobManager()
-storage_manager = StorageManager()
+job_manager = JobManager(
+    redis_host=os.environ.get("REDIS_HOST", "localhost"),
+    redis_port=int(os.environ.get("REDIS_PORT", "6379")),
+    storage_root=os.environ.get("STORAGE_ROOT", "storage"),
+)
+storage_manager = StorageManager(
+    storage_root=os.environ.get("STORAGE_ROOT", "storage"),
+)
 
 # ---------------------------------------------------------------------------
 # Category guidance

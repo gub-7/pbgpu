@@ -425,7 +425,7 @@ class JobManager:
             metadata_file.unlink()
 
         from .storage import StorageManager
-        storage = StorageManager()
+        storage = StorageManager(storage_root=str(self.storage_root))
         storage.cleanup_job(job_id)
 
     # ------------------------------------------------------------------
