@@ -9,7 +9,7 @@ Responsibilities:
     - Provide projection and reprojection utilities for downstream stages
     - Save ``camera_init.json`` artifact with all camera parameters
 
-Camera convention:
+Camera convention (matches camera_init.py):
     - World space: Y-up, right-handed
     - Camera space: X-right, Y-down, Z-forward (OpenCV convention)
     - Cameras orbit the origin at a shared distance, looking at (0, 0, 0)
@@ -59,6 +59,19 @@ MAX_FOCAL_ADJUSTMENT = 0.2
 # projected bounding box should occupy.  Derived from the preprocessing
 # FFR target (~0.60 area → ~0.77 side ratio).
 EXPECTED_BBOX_IMAGE_RATIO = 0.65
+
+# Up-hint for the top camera (looking straight down).
+# When the camera looks along -Y, the default world-up [0,1,0] is
+# anti-parallel to the viewing direction, so look_at() needs a hint
+# to determine the in-plane (roll) orientation.
+#
+# The AI-generated top view has the object's front-to-back axis along
+# the image horizontal and left-to-right along the image vertical.
+# Using [-1, 0, 0] as the up-hint produces:
+#   image right = world +Z (front-back)
+#   image down  = world +X (left-right)
+# which matches the AI image convention.
+TOP_CAMERA_UP_HINT = np.array([-1.0, 0.0, 0.0], dtype=np.float64)
 
 
 # ---------------------------------------------------------------------------
@@ -136,11 +149,11 @@ def look_at(
     right_norm = np.linalg.norm(right)
     if right_norm < 1e-10:
         # Forward is parallel to up — use a fallback up vector
-        fallback_up = np.array([0.0, 0.0, -1.0], dtype=np.float64)
+        fallback_up = np.array([-1.0, 0.0, 0.0], dtype=np.float64)
         right = -np.cross(forward, fallback_up)
         right_norm = np.linalg.norm(right)
         if right_norm < 1e-10:
-            fallback_up = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+            fallback_up = np.array([0.0, 0.0, -1.0], dtype=np.float64)
             right = -np.cross(forward, fallback_up)
             right_norm = np.linalg.norm(right)
     right = right / right_norm
@@ -463,6 +476,10 @@ def build_canonical_rig(
     looking at the origin. All cameras share the same focal length
     and image dimensions.
 
+    For the top camera (pitch ≈ -90°), a custom up-hint is used so
+    that the in-plane (roll) orientation matches the AI-generated
+    bird's-eye image.
+
     Args:
         config: Pipeline configuration (contains camera specs).
         image_size: (width, height) of the images in pixels.
@@ -483,9 +500,16 @@ def build_canonical_rig(
             spec.yaw_rad, spec.pitch_rad, spec.distance
         )
 
-        # Compute world-to-camera matrix
+        # Compute world-to-camera matrix.
+        # For the top camera (looking straight down), the default
+        # world-up [0,1,0] is anti-parallel to the viewing direction,
+        # so we pass a custom up-hint to control the in-plane roll.
         target = np.array([0.0, 0.0, 0.0], dtype=np.float64)
-        extrinsic = look_at(position, target)
+        if abs(spec.pitch_deg) > 80.0:
+            # Near-vertical camera — use the top-camera up-hint
+            extrinsic = look_at(position, target, up=TOP_CAMERA_UP_HINT)
+        else:
+            extrinsic = look_at(position, target)
 
         # Build intrinsic matrix
         intrinsic = build_intrinsic_matrix(
