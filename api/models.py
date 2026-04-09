@@ -289,6 +289,10 @@ class CanonicalMVParams(BaseModel):
         False,
         description="Export intermediate Gaussian .ply for debugging."
     )
+    debug_incremental_recon: bool = Field(
+        False,
+        description="Run incremental visual hull passes (1, 2, 3 views) and save debug previews."
+    )
 
     # Mesh post-processing
     decimation_target: int = Field(

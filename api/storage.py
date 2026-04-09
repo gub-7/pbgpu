@@ -30,7 +30,7 @@ from datetime import datetime
 _CANONICAL_VIEWS = ("front", "side", "top")
 
 # Preview sub-stages for multi-view jobs
-_PREVIEW_SUBSTAGES = ("raw", "segmented", "normalized")
+_PREVIEW_SUBSTAGES = ("raw", "segmented", "normalized", "debug_recon")
 
 # Well-known artifact filenames (stage -> filename)
 _KNOWN_ARTIFACTS: Dict[str, str] = {

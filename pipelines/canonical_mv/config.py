@@ -77,6 +77,7 @@ class CanonicalMVConfig:
     # Debug
     generate_debug_renders: bool = False
     generate_gaussian_debug: bool = False
+    debug_incremental_recon: bool = False
 
     # Mesh post-processing
     decimation_target: int = 500_000

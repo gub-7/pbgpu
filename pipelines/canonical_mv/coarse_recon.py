@@ -820,6 +820,318 @@ def save_depth_map_png(
     img.save(filepath)
 
 
+
+# ---------------------------------------------------------------------------
+# Debug: 3/4-angle preview renderer
+# ---------------------------------------------------------------------------
+
+
+def render_visual_hull_preview(
+    occupancy: np.ndarray,
+    grid_origin: np.ndarray,
+    voxel_size: float,
+    level: float = 0.5,
+    image_size: Tuple[int, int] = (512, 512),
+    azimuth_deg: float = 35.0,
+    elevation_deg: float = 25.0,
+    distance: float = 3.5,
+) -> np.ndarray:
+    """
+    Render a preview image of the visual hull from a 3/4 angle.
+
+    Creates a depth-colored rendering of the occupied voxels projected
+    through a virtual camera at the specified azimuth/elevation.
+
+    Args:
+        occupancy: (N, N, N) float32 occupancy grid.
+        grid_origin: (3,) world-space origin.
+        voxel_size: Voxel side length.
+        level: Occupancy threshold.
+        image_size: (width, height) of the output image.
+        azimuth_deg: Camera azimuth in degrees (0 = front).
+        elevation_deg: Camera elevation in degrees.
+        distance: Camera distance from origin.
+
+    Returns:
+        (H, W, 3) uint8 RGB image.
+    """
+    import math
+
+    binary = occupancy >= level
+    surface_coords = np.argwhere(binary)
+
+    w, h = image_size
+    img = np.zeros((h, w, 3), dtype=np.uint8)
+    img[:] = (30, 30, 40)  # dark background
+
+    if len(surface_coords) == 0:
+        # Draw "no data" text area
+        cv2.putText(img, "No occupied voxels", (w // 6, h // 2),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (200, 200, 200), 2)
+        return img
+
+    # Convert to world coordinates
+    surface_world = (
+        surface_coords.astype(np.float64) * voxel_size
+        + grid_origin
+        + voxel_size / 2
+    )
+
+    # Build a virtual camera at 3/4 angle
+    az = math.radians(azimuth_deg)
+    el = math.radians(elevation_deg)
+    cam_x = distance * math.cos(el) * math.sin(az)
+    cam_y = distance * math.sin(el)
+    cam_z = distance * math.cos(el) * math.cos(az)
+    eye = np.array([cam_x, cam_y, cam_z], dtype=np.float64)
+    target = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+
+    # Build view matrix (simplified look-at for rendering only)
+    fwd = target - eye
+    fwd = fwd / np.linalg.norm(fwd)
+    world_up = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+    right = -np.cross(fwd, world_up)
+    right_norm = np.linalg.norm(right)
+    if right_norm < 1e-10:
+        world_up = np.array([0.0, 0.0, -1.0], dtype=np.float64)
+        right = -np.cross(fwd, world_up)
+        right_norm = np.linalg.norm(right)
+    right = right / right_norm
+    up = np.cross(right, fwd)
+    up = up / np.linalg.norm(up)
+
+    # Camera-space rotation: X=right, Y=up (for rendering, not OpenCV), Z=-forward
+    R_view = np.zeros((3, 3), dtype=np.float64)
+    R_view[0, :] = right
+    R_view[1, :] = up  # Y=up for rendering (flip later for image coords)
+    R_view[2, :] = -fwd
+
+    t_view = -R_view @ eye
+
+    # Project points
+    n_pts = len(surface_world)
+    cam_coords = (R_view @ surface_world.T).T + t_view  # (N, 3)
+
+    # Perspective projection
+    focal = w * 0.8
+    cx, cy = w / 2.0, h / 2.0
+
+    z_cam = cam_coords[:, 2]
+    valid = z_cam > 0.01
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        px = focal * cam_coords[:, 0] / z_cam + cx
+        # Flip Y for image coords (Y-down in image)
+        py = -focal * cam_coords[:, 1] / z_cam + cy
+
+    in_bounds = valid & (px >= 0) & (px < w) & (py >= 0) & (py < h)
+    valid_idx = np.where(in_bounds)[0]
+
+    if len(valid_idx) == 0:
+        cv2.putText(img, "No visible voxels", (w // 6, h // 2),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (200, 200, 200), 2)
+        return img
+
+    # Z-buffer rendering with depth coloring
+    depth_buf = np.full((h, w), np.inf, dtype=np.float64)
+    color_buf = np.zeros((h, w, 3), dtype=np.uint8)
+
+    depths = z_cam[valid_idx]
+    min_d, max_d = depths.min(), depths.max()
+    depth_range = max(max_d - min_d, 0.001)
+
+    px_int = px[valid_idx].astype(np.int32)
+    py_int = py[valid_idx].astype(np.int32)
+
+    for i in range(len(valid_idx)):
+        x, y, d = px_int[i], py_int[i], depths[i]
+        if d < depth_buf[y, x]:
+            depth_buf[y, x] = d
+            # Color by depth: close = bright cyan, far = dark blue
+            t = 1.0 - (d - min_d) / depth_range
+            r = int(40 + 80 * t)
+            g = int(120 + 135 * t)
+            b = int(180 + 75 * t)
+            color_buf[y, x] = (r, g, b)
+
+    # Composite onto background
+    mask = depth_buf < np.inf
+    img[mask] = color_buf[mask]
+
+    # Dilate slightly to fill gaps between voxels
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    for c in range(3):
+        channel = img[:, :, c].copy()
+        dilated = cv2.dilate(channel, kernel, iterations=1)
+        # Only fill where the original was background
+        bg_mask = ~mask
+        channel[bg_mask] = dilated[bg_mask]
+        img[:, :, c] = channel
+
+    return img
+
+
+def _save_debug_preview(
+    filepath: str,
+    image: np.ndarray,
+    label: str,
+    n_occupied: int,
+) -> None:
+    """Save a debug preview image with an overlay label."""
+    img = image.copy()
+    h, w = img.shape[:2]
+
+    # Draw label background
+    cv2.rectangle(img, (0, 0), (w, 36), (0, 0, 0), -1)
+    cv2.putText(img, label, (10, 26),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+
+    # Draw voxel count
+    count_text = f"{n_occupied:,} voxels"
+    cv2.putText(img, count_text, (w - 180, 26),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (180, 220, 255), 1)
+
+    Image.fromarray(img).save(filepath)
+
+
+# ---------------------------------------------------------------------------
+# Debug: Incremental reconstruction
+# ---------------------------------------------------------------------------
+
+
+def run_incremental_debug_recon(
+    job_id: str,
+    config: CanonicalMVConfig,
+    jm: JobManager,
+    sm: StorageManager,
+    masks: Dict[str, np.ndarray],
+    images: Dict[str, np.ndarray],
+    rig: "CameraRig",
+    grid_res: int,
+) -> Dict[str, str]:
+    """
+    Run incremental visual hull reconstruction for debugging camera alignment.
+
+    Performs 3 passes with increasing numbers of views:
+        1. Front only → preview
+        2. Front + Side → preview
+        3. Front + Side + Top → preview
+
+    This lets the user see how each additional view carves the visual hull,
+    making it easy to spot if a view's camera angle is misaligned.
+
+    Args:
+        job_id: Job identifier.
+        config: Pipeline config.
+        jm: Job manager.
+        sm: Storage manager.
+        masks: Dict mapping view name → binary mask.
+        images: Dict mapping view name → RGB image.
+        rig: Calibrated camera rig.
+        grid_res: Voxel grid resolution.
+
+    Returns:
+        Dict mapping view name → preview artifact path (relative).
+    """
+    logger.info(f"[{job_id}] debug: running incremental reconstruction")
+
+    view_order = [vn for vn in CANONICAL_VIEW_ORDER if vn in masks]
+    if not view_order:
+        logger.warning(f"[{job_id}] debug: no views available for incremental recon")
+        return {}
+
+    preview_paths: Dict[str, str] = {}
+    artifact_dir = sm.get_artifact_dir(job_id)
+
+    for pass_idx in range(len(view_order)):
+        # Use views 0..pass_idx (inclusive)
+        active_views = view_order[: pass_idx + 1]
+        active_masks = {vn: masks[vn] for vn in active_views}
+        view_label = " + ".join(active_views)
+        pass_name = f"debug_recon_{pass_idx + 1}view"
+
+        logger.info(
+            f"[{job_id}] debug pass {pass_idx + 1}/{len(view_order)}: "
+            f"views=[{view_label}]"
+        )
+
+        try:
+            # Run visual hull with subset of views
+            # Use lower consensus for single-view (everything that view sees)
+            consensus = 1.0 / max(len(active_views), 1)
+
+            occupancy, grid_origin, voxel_size = compute_visual_hull(
+                masks=active_masks,
+                rig=rig,
+                grid_resolution=grid_res,
+                grid_half_extent=DEFAULT_GRID_HALF_EXTENT,
+                consensus_ratio=consensus,
+                mask_dilation=DEFAULT_MASK_DILATION,
+            )
+
+            binary = threshold_occupancy(occupancy, consensus)
+            n_occupied = int(binary.sum())
+
+            # Render preview from 3/4 angle
+            preview = render_visual_hull_preview(
+                occupancy, grid_origin, voxel_size,
+                level=consensus,
+                image_size=(512, 512),
+            )
+
+            # Save preview
+            preview_filename = f"{pass_name}.png"
+            preview_path = artifact_dir / preview_filename
+            _save_debug_preview(
+                str(preview_path),
+                preview,
+                f"Pass {pass_idx + 1}: {view_label}",
+                n_occupied,
+            )
+
+            # Also save as a view preview so the existing preview system picks it up
+            view_name = active_views[-1]  # the "new" view in this pass
+            # Convert rendered image to PNG bytes for the storage API
+            from io import BytesIO as _BytesIO
+            _buf = _BytesIO()
+            Image.fromarray(preview).save(_buf, format="PNG")
+            sm.save_view_preview(job_id, "debug_recon", view_name, _buf.getvalue())
+
+            preview_paths[view_name] = preview_filename
+
+            logger.info(
+                f"[{job_id}] debug pass {pass_idx + 1}: "
+                f"{n_occupied} occupied voxels, preview saved"
+            )
+
+        except Exception as e:
+            logger.warning(
+                f"[{job_id}] debug pass {pass_idx + 1} failed: {e}",
+                exc_info=True,
+            )
+            # Create error preview
+            err_img = np.zeros((512, 512, 3), dtype=np.uint8)
+            err_img[:] = (40, 20, 20)
+            cv2.putText(err_img, f"Pass {pass_idx + 1} failed", (30, 256),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 100, 100), 2)
+            cv2.putText(err_img, str(e)[:60], (30, 290),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 150, 150), 1)
+            preview_filename = f"{pass_name}.png"
+            preview_path = artifact_dir / preview_filename
+            Image.fromarray(err_img).save(str(preview_path))
+            view_name = active_views[-1]
+            preview_paths[view_name] = preview_filename
+
+    # Save debug metadata
+    sm.save_artifact_json(job_id, "debug_incremental_recon.json", {
+        "passes": len(view_order),
+        "views_per_pass": [view_order[:i+1] for i in range(len(view_order))],
+        "preview_files": preview_paths,
+    })
+
+    logger.info(f"[{job_id}] debug: incremental reconstruction complete")
+    return preview_paths
+
 # ---------------------------------------------------------------------------
 # Stage runner
 # ---------------------------------------------------------------------------
@@ -879,9 +1191,23 @@ def run_reconstruct_coarse(
     jm.update_job(job_id, stage_progress=0.1)
 
     # ------------------------------------------------------------------
-    # Step 3: Compute visual hull
+    # Debug: Incremental reconstruction (if enabled)
     # ------------------------------------------------------------------
     grid_res = _grid_resolution_from_config(config)
+
+    if config.debug_incremental_recon:
+        logger.info(f"[{job_id}] debug_incremental_recon enabled — running incremental passes")
+        debug_previews = run_incremental_debug_recon(
+            job_id, config, jm, sm, masks, images, rig, grid_res,
+        )
+        # Store debug preview paths in job metadata so the frontend can fetch them
+        # Debug previews are saved via sm.save_view_preview() and will be
+        jm.update_job(job_id, stage_progress=0.2)
+
+
+    # ------------------------------------------------------------------
+    # Step 3: Compute visual hull
+    # ------------------------------------------------------------------
 
     occupancy, grid_origin, voxel_size = compute_visual_hull(
         masks=masks,
