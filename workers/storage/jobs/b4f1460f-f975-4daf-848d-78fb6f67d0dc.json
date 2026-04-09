@@ -1,0 +1,17 @@
+{
+  "job_id": "b4f1460f-f975-4daf-848d-78fb6f67d0dc",
+  "category": "human_bust",
+  "model": "triposr",
+  "status": "failed",
+  "progress": 60,
+  "stages": {
+    "preprocessing": "completed",
+    "generation": "in_progress"
+  },
+  "params": {},
+  "created_at": "2026-02-27T05:12:40.867574",
+  "started_at": "2026-02-27T05:12:40.870444",
+  "completed_at": "2026-02-27T05:16:29.613112",
+  "error": "Preprocessed image not found",
+  "output_url": null
+}
