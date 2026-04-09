@@ -229,7 +229,14 @@ def compute_per_view_metrics(
             h, w = target_img.shape[:2]
             rendered_img = np.zeros_like(target_img)
             if vn in rendered_masks:
-                rendered_img[rendered_masks[vn] > 127] = [180, 180, 180]
+                r_mask = rendered_masks[vn]
+                # Resize rendered mask to match target image if needed
+                if r_mask.shape[:2] != (h, w):
+                    r_mask = cv2.resize(
+                        r_mask, (w, h),
+                        interpolation=cv2.INTER_NEAREST,
+                    )
+                rendered_img[r_mask > 127] = [180, 180, 180]
 
             metrics["masked_psnr"] = compute_masked_psnr(
                 rendered_img, target_img, target_mask,
@@ -533,7 +540,7 @@ def run_qa(
         rig = CameraRig.from_dict(rig_data)
         image_size = tuple(rig.shared_params["image_size"])
 
-    masks_dict, images_dict = _load_segmented_views(job_id, sm)
+    masks_dict, images_dict = _load_segmented_views(job_id, sm, target_size=image_size)
     jm.update_job(job_id, stage_progress=0.2)
 
     # ------------------------------------------------------------------
@@ -630,8 +637,16 @@ def run_qa(
 def _load_segmented_views(
     job_id: str,
     sm: StorageManager,
+    target_size: Optional[Tuple[int, int]] = None,
 ) -> Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray]]:
-    """Load segmented view masks and RGB images."""
+    """Load segmented view masks and RGB images.
+
+    Args:
+        job_id: Job identifier.
+        sm: Storage manager.
+        target_size: Optional (width, height) to resize loaded images to.
+                     Should match the camera rig image_size.
+    """
     from .coarse_recon import _load_segmented_views as _load
-    return _load(job_id, sm)
+    return _load(job_id, sm, target_size=target_size)
 
