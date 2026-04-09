@@ -5,7 +5,7 @@ WORKDIR /app
 # Install system dependencies (libgl1 + libglib2 needed by opencv)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
-    libgl1-mesa-glx \
+    libgl1 \
     libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
