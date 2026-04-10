@@ -603,20 +603,31 @@ async def calibrate_cameras(job_id: str, body: dict):
     """
     Run a fast camera calibration preview.
 
-    Accepts camera parameter overrides and returns a visual hull
-    preview image plus per-view depth maps and mask overlays,
+    Accepts per-view camera + image transform overrides and returns
+    a visual hull preview plus per-view depth maps and mask overlays,
     all as base64-encoded PNGs.
 
     Body JSON::
 
         {
             "cameras": {
-                "front": {"yaw_deg": 0, "pitch_deg": 0, "distance": 2.5, "focal_length": 50},
-                "side":  {"yaw_deg": 90, "pitch_deg": 0, "distance": 2.5, "focal_length": 50},
-                "top":   {"yaw_deg": 0, "pitch_deg": -90, "distance": 2.5, "focal_length": 50}
+                "front": {
+                    "yaw_deg": 0, "pitch_deg": 0,
+                    "distance": 2.5, "focal_length": 50,
+                    "up_hint": [0, 1, 0],
+                    "rotation_deg": 0, "flip_h": false, "flip_v": false
+                },
+                "side": { ... },
+                "top": {
+                    "yaw_deg": 0, "pitch_deg": -90,
+                    "distance": 2.5, "focal_length": 50,
+                    "up_hint": [-1, 0, 0],
+                    "rotation_deg": 0, "flip_h": false, "flip_v": false
+                }
             },
-            "top_up_hint": [-1, 0, 0],
             "grid_resolution": 64,
+            "grid_half_extent": 1.0,
+            "sensor_width_mm": 36.0,
             "consensus_ratio": 0.6,
             "mask_dilation": 15
         }
@@ -628,8 +639,9 @@ async def calibrate_cameras(job_id: str, body: dict):
         raise HTTPException(404, "Job not found")
 
     camera_overrides = body.get("cameras", {})
-    top_up_hint = body.get("top_up_hint", None)
     grid_resolution = int(body.get("grid_resolution", 64))
+    grid_half_extent = float(body.get("grid_half_extent", 1.0))
+    sensor_width_mm = float(body.get("sensor_width_mm", 36.0))
     consensus_ratio = float(body.get("consensus_ratio", 0.6))
     mask_dilation = int(body.get("mask_dilation", 15))
 
@@ -643,8 +655,9 @@ async def calibrate_cameras(job_id: str, body: dict):
             job_id=job_id,
             sm=storage_manager,
             camera_overrides=camera_overrides,
-            top_up_hint=top_up_hint,
             grid_resolution=grid_resolution,
+            grid_half_extent=grid_half_extent,
+            sensor_width_mm=sensor_width_mm,
             consensus_ratio=consensus_ratio,
             mask_dilation=mask_dilation,
         )
