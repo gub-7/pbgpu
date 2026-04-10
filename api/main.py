@@ -594,37 +594,99 @@ async def rerun_stage(job_id: str, stage: str = Form(...)):
 
 
 # ===================================================================
-# ENDPOINTS: Camera calibration (fast preview)
+# ENDPOINTS: Camera calibration (standalone — accepts image uploads)
 # ===================================================================
 
 
-@app.post("/api/job/{job_id}/calibrate_cameras")
-async def calibrate_cameras(job_id: str, body: dict):
+def _load_upload_image(upload: UploadFile) -> "np.ndarray":
+    """Read an UploadFile into an RGB numpy array."""
+    import numpy as np
+    from PIL import Image as PILImage
+    import io as _io
+
+    content = upload.file.read()
+    upload.file.seek(0)
+    img = PILImage.open(_io.BytesIO(content)).convert("RGB")
+    return np.array(img)
+
+
+@app.post("/api/calibrate_sweep")
+async def calibrate_sweep_standalone(
+    front: UploadFile = File(...),
+    side: UploadFile = File(...),
+    top: UploadFile = File(...),
+    grid_resolution: int = Form(48),
+    grid_half_extent: float = Form(1.0),
+    sensor_width_mm: float = Form(36.0),
+    consensus_ratio: float = Form(0.6),
+    mask_dilation: int = Form(15),
+):
     """
-    Run a fast camera calibration preview.
+    Brute-force sweep of all orientation combos per view.
 
-    Accepts per-view camera + image transform overrides and returns
-    a visual hull preview plus per-view depth maps and mask overlays,
-    all as base64-encoded PNGs.
+    Accepts the 3 canonical view images directly as file uploads.
+    No job or pipeline artifacts required.
 
-    Body JSON::
+    Returns per-view contact sheet PNGs (base64) showing every
+    combination of image rotation, flip, and up-hint.  The user
+    visually picks the combo where green (mask) and red (hull) overlap.
+    """
+    import base64
+
+    grid_resolution = max(32, min(grid_resolution, 128))
+
+    try:
+        raw_images = {
+            "front": _load_upload_image(front),
+            "side": _load_upload_image(side),
+            "top": _load_upload_image(top),
+        }
+    except Exception as e:
+        raise HTTPException(400, f"Failed to read uploaded images: {e}")
+
+    try:
+        from pipelines.canonical_mv.calibrate import run_calibration_sweep
+
+        sheets = run_calibration_sweep(
+            raw_images=raw_images,
+            grid_resolution=grid_resolution,
+            grid_half_extent=grid_half_extent,
+            sensor_width_mm=sensor_width_mm,
+            consensus_ratio=consensus_ratio,
+            mask_dilation=mask_dilation,
+        )
+
+        response = {
+            key: base64.b64encode(png).decode("ascii")
+            for key, png in sheets.items()
+        }
+
+        return JSONResponse(content=response)
+
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        logger.error(f"Calibration sweep failed: {e}", exc_info=True)
+        raise HTTPException(500, f"Calibration sweep failed: {e}")
+
+
+@app.post("/api/calibrate_cameras")
+async def calibrate_cameras_standalone(
+    front: UploadFile = File(...),
+    side: UploadFile = File(...),
+    top: UploadFile = File(...),
+    params: str = Form("{}"),
+):
+    """
+    Run a fast camera calibration preview with custom params.
+
+    Accepts the 3 canonical view images directly as file uploads.
+    No job or pipeline artifacts required.
+
+    The ``params`` field is a JSON string with camera overrides::
 
         {
-            "cameras": {
-                "front": {
-                    "yaw_deg": 0, "pitch_deg": 0,
-                    "distance": 2.5, "focal_length": 50,
-                    "up_hint": [0, 1, 0],
-                    "rotation_deg": 0, "flip_h": false, "flip_v": false
-                },
-                "side": { ... },
-                "top": {
-                    "yaw_deg": 0, "pitch_deg": -90,
-                    "distance": 2.5, "focal_length": 50,
-                    "up_hint": [-1, 0, 0],
-                    "rotation_deg": 0, "flip_h": false, "flip_v": false
-                }
-            },
+            "cameras": { "front": {...}, "side": {...}, "top": {...} },
             "grid_resolution": 64,
             "grid_half_extent": 1.0,
             "sensor_width_mm": 36.0,
@@ -634,9 +696,10 @@ async def calibrate_cameras(job_id: str, body: dict):
     """
     import base64
 
-    job_data = job_manager.get_job(job_id)
-    if not job_data:
-        raise HTTPException(404, "Job not found")
+    try:
+        body = json.loads(params)
+    except json.JSONDecodeError:
+        raise HTTPException(400, "Invalid params JSON")
 
     camera_overrides = body.get("cameras", {})
     grid_resolution = int(body.get("grid_resolution", 64))
@@ -645,15 +708,22 @@ async def calibrate_cameras(job_id: str, body: dict):
     consensus_ratio = float(body.get("consensus_ratio", 0.6))
     mask_dilation = int(body.get("mask_dilation", 15))
 
-    # Clamp grid resolution for speed
     grid_resolution = max(32, min(grid_resolution, 192))
+
+    try:
+        raw_images = {
+            "front": _load_upload_image(front),
+            "side": _load_upload_image(side),
+            "top": _load_upload_image(top),
+        }
+    except Exception as e:
+        raise HTTPException(400, f"Failed to read uploaded images: {e}")
 
     try:
         from pipelines.canonical_mv.calibrate import run_calibration_preview
 
         result = run_calibration_preview(
-            job_id=job_id,
-            sm=storage_manager,
+            raw_images=raw_images,
             camera_overrides=camera_overrides,
             grid_resolution=grid_resolution,
             grid_half_extent=grid_half_extent,
@@ -662,7 +732,6 @@ async def calibrate_cameras(job_id: str, body: dict):
             mask_dilation=mask_dilation,
         )
 
-        # Encode images as base64
         response = {
             "preview": base64.b64encode(result["preview_png"]).decode("ascii"),
             "depth_maps": {
@@ -682,67 +751,8 @@ async def calibrate_cameras(job_id: str, body: dict):
     except ValueError as e:
         raise HTTPException(400, str(e))
     except Exception as e:
-        logger.error(f"Calibration failed for job {job_id}: {e}", exc_info=True)
+        logger.error(f"Calibration failed: {e}", exc_info=True)
         raise HTTPException(500, f"Calibration failed: {e}")
-
-
-# ===================================================================
-# ENDPOINTS: Camera calibration sweep (brute-force all combos)
-# ===================================================================
-
-
-@app.post("/api/job/{job_id}/calibrate_sweep")
-async def calibrate_sweep(job_id: str, body: dict = None):
-    """
-    Brute-force sweep of all orientation combos per view.
-
-    Returns per-view contact sheet PNGs (base64) showing every
-    combination of image rotation, flip, and up-hint.  The user
-    visually picks the combo where green (mask) and red (hull) overlap.
-
-    Optional body params: grid_resolution (default 48),
-    grid_half_extent, sensor_width_mm, consensus_ratio, mask_dilation.
-    """
-    import base64
-
-    job_data = job_manager.get_job(job_id)
-    if not job_data:
-        raise HTTPException(404, "Job not found")
-
-    body = body or {}
-    grid_resolution = int(body.get("grid_resolution", 48))
-    grid_half_extent = float(body.get("grid_half_extent", 1.0))
-    sensor_width_mm = float(body.get("sensor_width_mm", 36.0))
-    consensus_ratio = float(body.get("consensus_ratio", 0.6))
-    mask_dilation = int(body.get("mask_dilation", 15))
-
-    grid_resolution = max(32, min(grid_resolution, 128))
-
-    try:
-        from pipelines.canonical_mv.calibrate import run_calibration_sweep
-
-        sheets = run_calibration_sweep(
-            job_id=job_id,
-            sm=storage_manager,
-            grid_resolution=grid_resolution,
-            grid_half_extent=grid_half_extent,
-            sensor_width_mm=sensor_width_mm,
-            consensus_ratio=consensus_ratio,
-            mask_dilation=mask_dilation,
-        )
-
-        response = {
-            key: base64.b64encode(png).decode("ascii")
-            for key, png in sheets.items()
-        }
-
-        return JSONResponse(content=response)
-
-    except ValueError as e:
-        raise HTTPException(400, str(e))
-    except Exception as e:
-        logger.error(f"Calibration sweep failed for job {job_id}: {e}", exc_info=True)
-        raise HTTPException(500, f"Calibration sweep failed: {e}")
 
 
 # ===================================================================

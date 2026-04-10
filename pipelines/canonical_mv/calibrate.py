@@ -7,6 +7,11 @@ Provides:
    combo per view, producing labelled contact sheets so the user can
    visually pick the correct one.
 
+**Standalone operation**: These functions accept raw images directly
+(as numpy arrays or PIL images) and perform segmentation inline.
+They do NOT require the GPU pipeline to have run — no
+``preprocess_metrics.json`` or other artifacts are needed.
+
 Every variable that affects alignment is exposed:
     - Per-view camera placement: yaw, pitch, distance, focal_length
     - Per-view up-hint vector (controls in-plane roll)
@@ -24,9 +29,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
-
-from api.storage import StorageManager
+from PIL import Image
 
 from .camera_init import (
     CameraRig,
@@ -118,13 +121,99 @@ _ORIENTATIONS: List[Tuple[int, bool]] = [
 
 
 # ---------------------------------------------------------------------------
+# Inline segmentation (no pipeline artifacts needed)
+# ---------------------------------------------------------------------------
+
+
+def _segment_image_inline(image: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Segment a single image inline, returning mask and RGB.
+
+    Uses rembg for background removal. Falls back to simple
+    thresholding if rembg is unavailable.
+
+    Args:
+        image: RGB image as (H, W, 3) uint8 numpy array.
+
+    Returns:
+        Tuple of (mask, rgb) where:
+            mask: (H, W) uint8 binary mask (0 or 255)
+            rgb: (H, W, 3) uint8 RGB image
+    """
+    try:
+        from rembg import remove
+
+        pil_img = Image.fromarray(image)
+        result = remove(pil_img)
+        rgba = np.array(result)
+
+        if rgba.shape[2] == 4:
+            mask = rgba[:, :, 3]
+            rgb = rgba[:, :, :3]
+        else:
+            rgb = rgba[:, :, :3]
+            gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+            mask = (gray > 10).astype(np.uint8) * 255
+
+        # Harden alpha to binary
+        mask = ((mask > 127).astype(np.uint8)) * 255
+        return mask, rgb
+
+    except ImportError:
+        logger.warning("rembg not available, using simple threshold segmentation")
+        gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+        mask = (gray > 10).astype(np.uint8) * 255
+        return mask, image
+
+
+def _prepare_views_from_images(
+    raw_images: Dict[str, np.ndarray],
+    target_size: Tuple[int, int] = (1024, 1024),
+) -> Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray]]:
+    """
+    Prepare view masks and images from raw uploaded images.
+
+    Resizes all images to a common size, then segments them.
+
+    Args:
+        raw_images: Dict mapping view name → RGB image (H, W, 3) uint8.
+        target_size: (width, height) to resize all images to.
+
+    Returns:
+        Tuple of (masks_dict, images_dict).
+    """
+    masks = {}
+    images = {}
+
+    for vn in CANONICAL_VIEW_ORDER:
+        if vn not in raw_images:
+            continue
+
+        img = raw_images[vn]
+
+        # Resize to target size
+        tw, th = target_size
+        if img.shape[1] != tw or img.shape[0] != th:
+            pil = Image.fromarray(img)
+            pil = pil.resize((tw, th), Image.Resampling.LANCZOS)
+            img = np.array(pil)
+
+        # Segment
+        mask, rgb = _segment_image_inline(img)
+        masks[vn] = mask
+        images[vn] = rgb
+
+    return masks, images
+
+
+# ---------------------------------------------------------------------------
 # Sweep: brute-force all orientation combos
 # ---------------------------------------------------------------------------
 
 
 def run_calibration_sweep(
-    job_id: str,
-    sm: StorageManager,
+    raw_images: Dict[str, np.ndarray],
+    canvas_size: int = 1024,
     grid_resolution: int = 48,
     grid_half_extent: float = DEFAULT_GRID_HALF_EXTENT,
     sensor_width_mm: float = DEFAULT_SENSOR_WIDTH_MM,
@@ -142,9 +231,12 @@ def run_calibration_sweep(
 
     The user visually picks the combo where green and red overlap.
 
+    **Standalone**: Accepts raw images directly. Does NOT require any
+    pipeline artifacts to exist.
+
     Args:
-        job_id: Job ID (must have completed preprocess_views).
-        sm: Storage manager.
+        raw_images: Dict mapping view name → RGB image (H, W, 3) uint8.
+        canvas_size: Target image size for processing.
         grid_resolution: Voxel grid resolution (lower = faster).
         grid_half_extent: World-space half-extent.
         sensor_width_mm: Camera sensor width.
@@ -153,32 +245,25 @@ def run_calibration_sweep(
 
     Returns:
         Dict mapping ``"{view}_sheet"`` → PNG bytes of the contact sheet.
-        Also includes ``"combined_preview"`` with the best-of-each preview.
     """
-    logger.info(f"[{job_id}] sweep: starting (grid={grid_resolution})")
+    logger.info(f"sweep: starting (grid={grid_resolution}, views={list(raw_images.keys())})")
 
-    # ------------------------------------------------------------------
-    # Load data
-    # ------------------------------------------------------------------
-    preprocess_metrics = sm.load_artifact_json(job_id, "preprocess_metrics.json")
-    if preprocess_metrics is None:
-        raise ValueError("preprocess_metrics.json not found")
-    canvas_size = preprocess_metrics.get("canvas_size", 1024)
     image_size = (canvas_size, canvas_size)
 
-    raw_masks, raw_images = _load_segmented_views(job_id, sm, target_size=image_size)
-    if len(raw_masks) < 2:
-        raise ValueError(f"Only {len(raw_masks)} views found, need ≥ 2")
+    # Segment all views
+    logger.info("sweep: segmenting views...")
+    base_masks, base_images = _prepare_views_from_images(raw_images, target_size=image_size)
 
-    logger.info(f"[{job_id}] sweep: loaded {len(raw_masks)} views")
+    if len(base_masks) < 2:
+        raise ValueError(f"Only {len(base_masks)} views found, need at least 2")
 
-    # ------------------------------------------------------------------
+    logger.info(f"sweep: segmented {len(base_masks)} views")
+
     # Build combos per view
-    # ------------------------------------------------------------------
     view_combos: Dict[str, List[Dict[str, Any]]] = {}
 
     for vn in CANONICAL_VIEW_ORDER:
-        if vn not in raw_masks:
+        if vn not in base_masks:
             continue
 
         up_hints = _TOP_UP_HINTS if vn == "top" else _HORIZONTAL_UP_HINTS
@@ -191,25 +276,23 @@ def run_calibration_sweep(
                     "up_hint": up_hint,
                     "rotation_deg": rot,
                     "flip_h": flip_h,
-                    "label": f"up={up_label} rot={rot}° {'flipH' if flip_h else ''}".strip(),
+                    "label": f"up={up_label} rot={rot}\u00b0 {'flipH' if flip_h else ''}".strip(),
                 })
         view_combos[vn] = combos
 
-    # ------------------------------------------------------------------
     # Run each combo
-    # ------------------------------------------------------------------
     TILE_SIZE = 256
     results: Dict[str, bytes] = {}
 
     for vn, combos in view_combos.items():
-        logger.info(f"[{job_id}] sweep: {vn} — {len(combos)} combos")
+        logger.info(f"sweep: {vn} — {len(combos)} combos")
         tiles: List[Tuple[np.ndarray, str, int]] = []
 
         for ci, combo in enumerate(combos):
             try:
                 tile, n_occ = _run_single_combo(
                     vn, combo,
-                    raw_masks, raw_images,
+                    base_masks, base_images,
                     image_size, sensor_width_mm,
                     grid_resolution, grid_half_extent,
                     consensus_ratio, mask_dilation,
@@ -217,7 +300,7 @@ def run_calibration_sweep(
                 )
                 tiles.append((tile, combo["label"], n_occ))
             except Exception as e:
-                logger.warning(f"[{job_id}] sweep {vn} combo {ci} failed: {e}")
+                logger.warning(f"sweep {vn} combo {ci} failed: {e}")
                 err_tile = np.zeros((TILE_SIZE, TILE_SIZE, 3), dtype=np.uint8)
                 err_tile[:] = (40, 20, 20)
                 cv2.putText(err_tile, "ERROR", (10, TILE_SIZE // 2),
@@ -230,9 +313,9 @@ def run_calibration_sweep(
         Image.fromarray(sheet).save(buf, format="PNG")
         results[f"{vn}_sheet"] = buf.getvalue()
 
-        logger.info(f"[{job_id}] sweep: {vn} sheet done ({len(tiles)} tiles)")
+        logger.info(f"sweep: {vn} sheet done ({len(tiles)} tiles)")
 
-    logger.info(f"[{job_id}] sweep: complete")
+    logger.info("sweep: complete")
     return results
 
 
@@ -381,14 +464,14 @@ def _make_contact_sheet(
 
 
 # ---------------------------------------------------------------------------
-# Single-shot preview (unchanged API)
+# Single-shot preview
 # ---------------------------------------------------------------------------
 
 
 def run_calibration_preview(
-    job_id: str,
-    sm: StorageManager,
+    raw_images: Dict[str, np.ndarray],
     camera_overrides: Dict[str, Dict[str, Any]],
+    canvas_size: int = 1024,
     grid_resolution: int = 64,
     grid_half_extent: float = DEFAULT_GRID_HALF_EXTENT,
     sensor_width_mm: float = DEFAULT_SENSOR_WIDTH_MM,
@@ -398,34 +481,35 @@ def run_calibration_preview(
     """
     Run a fast camera calibration preview with explicit overrides.
 
+    **Standalone**: Accepts raw images directly. Does NOT require any
+    pipeline artifacts to exist.
+
     Returns dict with preview_png, depth_pngs, overlay_pngs, n_occupied,
     occupancy_pct, and the serialized rig.
     """
-    logger.info(f"[{job_id}] calibration: starting (grid={grid_resolution})")
+    logger.info(f"calibration: starting (grid={grid_resolution})")
 
-    preprocess_metrics = sm.load_artifact_json(job_id, "preprocess_metrics.json")
-    if preprocess_metrics is None:
-        raise ValueError("preprocess_metrics.json not found")
-    canvas_size = preprocess_metrics.get("canvas_size", 1024)
     image_size = (canvas_size, canvas_size)
 
-    raw_masks, raw_images = _load_segmented_views(job_id, sm, target_size=image_size)
-    if len(raw_masks) < 2:
-        raise ValueError(f"Only {len(raw_masks)} views found, need ≥ 2")
+    # Segment all views
+    base_masks, base_images = _prepare_views_from_images(raw_images, target_size=image_size)
+
+    if len(base_masks) < 2:
+        raise ValueError(f"Only {len(base_masks)} views found, need at least 2")
 
     # Apply per-view image transforms
     masks: Dict[str, np.ndarray] = {}
     images: Dict[str, np.ndarray] = {}
 
     for vn in CANONICAL_VIEW_ORDER:
-        if vn not in raw_masks:
+        if vn not in base_masks:
             continue
         overrides = camera_overrides.get(vn, {})
         rot = int(overrides.get("rotation_deg", 0))
         flip_h = bool(overrides.get("flip_h", False))
         flip_v = bool(overrides.get("flip_v", False))
         m, img = _apply_image_transforms(
-            raw_masks[vn].copy(), raw_images[vn].copy(), rot, flip_h, flip_v,
+            base_masks[vn].copy(), base_images[vn].copy(), rot, flip_h, flip_v,
         )
         masks[vn] = m
         images[vn] = img
@@ -458,7 +542,10 @@ def run_calibration_preview(
         occupancy, rig, grid_origin, voxel_size, image_size,
         level=consensus_ratio,
     )
-    max_depth = max((float(dm.max()) for dm in depth_maps.values() if np.any(dm > 0)), default=1.0)
+    max_depth = max(
+        (float(dm.max()) for dm in depth_maps.values() if np.any(dm > 0)),
+        default=1.0,
+    )
     depth_pngs = {vn: _depth_to_colored_png(dm, max_depth) for vn, dm in depth_maps.items()}
 
     # Overlays
@@ -589,21 +676,6 @@ def _build_rig_from_overrides(
 
 
 # ---------------------------------------------------------------------------
-# Load views helper
-# ---------------------------------------------------------------------------
-
-
-def _load_segmented_views(
-    job_id: str,
-    sm: StorageManager,
-    target_size: Optional[Tuple[int, int]] = None,
-) -> Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray]]:
-    """Load segmented view masks and RGB images."""
-    from .coarse_recon import _load_segmented_views as _load
-    return _load(job_id, sm, target_size=target_size)
-
-
-# ---------------------------------------------------------------------------
 # Rendering helpers
 # ---------------------------------------------------------------------------
 
@@ -611,6 +683,7 @@ def _load_segmented_views(
 def _annotate_preview(
     img: np.ndarray, n_occupied: int, grid_res: int, consensus: float,
 ) -> None:
+    """Add annotation bar to the bottom of a preview image."""
     h, w = img.shape[:2]
     cv2.rectangle(img, (0, h - 44), (w, h), (0, 0, 0), -1)
     text = f"Voxels: {n_occupied:,}  |  Grid: {grid_res}  |  Consensus: {consensus:.0%}"
@@ -619,6 +692,7 @@ def _annotate_preview(
 
 
 def _depth_to_colored_png(depth_map: np.ndarray, max_depth: float) -> bytes:
+    """Convert a depth map to a colored PNG image (turbo colormap)."""
     h, w = depth_map.shape
     valid = depth_map > 0
     norm = np.zeros((h, w), dtype=np.uint8)
