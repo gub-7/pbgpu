@@ -166,24 +166,76 @@ def _segment_image_inline(image: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         return mask, image
 
 
+def _normalize_mask(mask: np.ndarray, image: np.ndarray, size: int = 1024) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Normalize a mask and image to consistent center and scale.
+
+    This is CRITICAL for multi-view reconstruction. All views must have
+    the object at the same scale and centered at the same location,
+    otherwise the visual hull will be geometrically inconsistent.
+
+    Args:
+        mask: Binary mask (H, W) uint8.
+        image: RGB image (H, W, 3) uint8.
+        size: Target size (square).
+
+    Returns:
+        Tuple of (normalized_mask, normalized_image).
+    """
+    # Find object bounding box
+    ys, xs = np.where(mask > 127)
+    if len(xs) == 0 or len(ys) == 0:
+        # Empty mask — return centered blank
+        return np.zeros((size, size), dtype=np.uint8), np.zeros((size, size, 3), dtype=np.uint8)
+
+    # Compute center and extent
+    cx = float(xs.mean())
+    cy = float(ys.mean())
+    w = float(xs.max() - xs.min())
+    h = float(ys.max() - ys.min())
+
+    # Scale to fill 60% of target canvas (consistent across all views)
+    scale = (size * 0.6) / max(w, h, 1e-6)
+
+    # Affine transform: scale + translate to center
+    M = np.array([
+        [scale, 0, size / 2 - cx * scale],
+        [0, scale, size / 2 - cy * scale],
+    ], dtype=np.float32)
+
+    # Apply to both mask and image
+    norm_mask = cv2.warpAffine(mask, M, (size, size), flags=cv2.INTER_LINEAR)
+    norm_image = cv2.warpAffine(image, M, (size, size), flags=cv2.INTER_LINEAR)
+
+    # Binarize mask after interpolation
+    norm_mask = ((norm_mask > 127).astype(np.uint8)) * 255
+
+    return norm_mask, norm_image
+
+
 def _prepare_views_from_images(
     raw_images: Dict[str, np.ndarray],
     target_size: Tuple[int, int] = (1024, 1024),
+    normalize: bool = True,
 ) -> Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray]]:
     """
     Prepare view masks and images from raw uploaded images.
 
-    Resizes all images to a common size, then segments them.
+    Segments, then normalizes all masks to consistent center and scale.
 
     Args:
         raw_images: Dict mapping view name → RGB image (H, W, 3) uint8.
         target_size: (width, height) to resize all images to.
+        normalize: If True, normalize all masks to same center/scale (CRITICAL for multi-view).
 
     Returns:
         Tuple of (masks_dict, images_dict).
     """
     masks = {}
     images = {}
+
+    tw, th = target_size
+    assert tw == th, "Target size must be square for normalization"
 
     for vn in CANONICAL_VIEW_ORDER:
         if vn not in raw_images:
@@ -192,7 +244,6 @@ def _prepare_views_from_images(
         img = raw_images[vn]
 
         # Resize to target size
-        tw, th = target_size
         if img.shape[1] != tw or img.shape[0] != th:
             pil = Image.fromarray(img)
             pil = pil.resize((tw, th), Image.Resampling.LANCZOS)
@@ -200,6 +251,11 @@ def _prepare_views_from_images(
 
         # Segment
         mask, rgb = _segment_image_inline(img)
+
+        # Normalize to consistent center and scale
+        if normalize:
+            mask, rgb = _normalize_mask(mask, rgb, size=tw)
+
         masks[vn] = mask
         images[vn] = rgb
 
@@ -716,19 +772,21 @@ def _render_mask_projection_overlay(
     level: float,
 ) -> np.ndarray:
     """
-    Overlay showing green = mask boundary, red = projected hull.
+    Overlay showing green = mask edges, red = projected hull silhouette edges.
+
+    Uses proper silhouette rendering with z-buffering instead of projecting
+    all voxels (which creates a "red explosion"). This makes misalignment
+    much more visible.
     """
     h, w = image.shape[:2]
     overlay = (image.astype(np.float32) * 0.4).astype(np.uint8)
 
-    # Mask outline (green)
+    # Mask edges (green)
     binary_mask = (mask > 127).astype(np.uint8)
-    contours, _ = cv2.findContours(
-        binary_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE,
-    )
-    cv2.drawContours(overlay, contours, -1, (0, 255, 0), 2)
+    mask_edges = cv2.Canny(binary_mask * 255, 50, 150)
+    overlay[mask_edges > 0] = [0, 255, 0]  # bright green
 
-    # Project hull voxels
+    # Project hull voxels with z-buffering
     binary = occupancy >= level
     coords = np.argwhere(binary)
     if len(coords) == 0:
@@ -736,6 +794,7 @@ def _render_mask_projection_overlay(
                      cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 80, 80), 2)
         return overlay
 
+    # Transform to camera space
     world = coords.astype(np.float64) * voxel_size + grid_origin + voxel_size / 2
     ones = np.ones((len(world), 1), dtype=np.float64)
     homo = np.hstack([world, ones])
@@ -751,24 +810,33 @@ def _render_mask_projection_overlay(
         py = p[:, 1] / p[:, 2]
 
     valid = (z > 0) & (px >= 0) & (px < w) & (py >= 0) & (py < h)
-    vi = np.where(valid)[0]
 
-    proj = np.zeros((h, w), dtype=np.uint8)
-    if len(vi) > 0:
-        proj[py[vi].astype(np.int32), px[vi].astype(np.int32)] = 255
+    # Z-buffer: keep only the nearest depth per pixel
+    depth_buffer = np.full((h, w), np.inf, dtype=np.float32)
+    silhouette = np.zeros((h, w), dtype=np.uint8)
 
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-    proj = cv2.dilate(proj, kernel, iterations=1)
+    for i in np.where(valid)[0]:
+        x = int(px[i])
+        y = int(py[i])
+        depth = z[i]
+        if depth < depth_buffer[y, x]:
+            depth_buffer[y, x] = depth
+            silhouette[y, x] = 255
 
-    # Red fill
-    overlay[proj > 0] = (
-        overlay[proj > 0].astype(np.float32) * 0.5
-        + np.array([255, 40, 40], dtype=np.float32) * 0.5
+    # Dilate silhouette slightly for visibility
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    silhouette = cv2.dilate(silhouette, kernel, iterations=1)
+
+    # Extract silhouette edges (red)
+    hull_edges = cv2.Canny(silhouette, 50, 150)
+    overlay[hull_edges > 0] = [255, 60, 60]  # bright red
+
+    # Add semi-transparent fill for better visibility
+    silhouette_mask = silhouette > 0
+    overlay[silhouette_mask] = (
+        overlay[silhouette_mask].astype(np.float32) * 0.7
+        + np.array([255, 40, 40], dtype=np.float32) * 0.3
     ).astype(np.uint8)
-
-    # Red outline
-    pc, _ = cv2.findContours(proj, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    cv2.drawContours(overlay, pc, -1, (255, 60, 60), 2)
 
     return overlay
 

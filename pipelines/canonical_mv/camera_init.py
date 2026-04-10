@@ -122,16 +122,18 @@ def look_at(
         - Y → down
         - Z → forward (into the scene)
 
+    Uses Z-up world convention for better stability with top-down views.
+
     Args:
         eye: Camera position in world space (3,).
         target: Point the camera looks at (3,).
-        up: World up vector (3,). Defaults to (0, 1, 0).
+        up: World up vector (3,). Defaults to (0, 0, 1) [Z-up].
 
     Returns:
         4×4 world-to-camera matrix (np.float64).
     """
     if up is None:
-        up = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+        up = np.array([0.0, 0.0, 1.0], dtype=np.float64)
 
     eye = np.asarray(eye, dtype=np.float64)
     target = np.asarray(target, dtype=np.float64)
@@ -145,32 +147,27 @@ def look_at(
     forward = forward / forward_norm
 
     # Right direction
-    right = -np.cross(forward, up)
+    right = np.cross(forward, up)
     right_norm = np.linalg.norm(right)
     if right_norm < 1e-10:
         # Forward is parallel to up — use a fallback up vector
-        fallback_up = np.array([-1.0, 0.0, 0.0], dtype=np.float64)
-        right = -np.cross(forward, fallback_up)
+        fallback_up = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+        right = np.cross(forward, fallback_up)
         right_norm = np.linalg.norm(right)
         if right_norm < 1e-10:
-            fallback_up = np.array([0.0, 0.0, -1.0], dtype=np.float64)
-            right = -np.cross(forward, fallback_up)
+            fallback_up = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+            right = np.cross(forward, fallback_up)
             right_norm = np.linalg.norm(right)
     right = right / right_norm
 
-    # True up (orthogonal to forward and right)
-    true_up = np.cross(right, forward)
-    true_up = true_up / np.linalg.norm(true_up)
+    # Down direction (camera Y-axis points down in OpenCV convention)
+    down = np.cross(forward, right)
+    down = down / np.linalg.norm(down)
 
     # OpenCV convention: X=right, Y=down, Z=forward
-    # Negating the cross product for right gives correct handedness;
-    # true_up then naturally points world-down, so R[1,:]=true_up gives camera Y=down.
-    # det(R) = -1 (reflection), which is correct for mapping a right-handed
-    # world frame to the OpenCV camera frame.
-
     R = np.eye(3, dtype=np.float64)
     R[0, :] = right       # camera X = right
-    R[1, :] = true_up     # camera Y = down (true_up points world-down after right negation)
+    R[1, :] = down        # camera Y = down
     R[2, :] = forward     # camera Z = forward
 
     # Translation: t = -R @ eye
