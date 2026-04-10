@@ -687,6 +687,65 @@ async def calibrate_cameras(job_id: str, body: dict):
 
 
 # ===================================================================
+# ENDPOINTS: Camera calibration sweep (brute-force all combos)
+# ===================================================================
+
+
+@app.post("/api/job/{job_id}/calibrate_sweep")
+async def calibrate_sweep(job_id: str, body: dict = None):
+    """
+    Brute-force sweep of all orientation combos per view.
+
+    Returns per-view contact sheet PNGs (base64) showing every
+    combination of image rotation, flip, and up-hint.  The user
+    visually picks the combo where green (mask) and red (hull) overlap.
+
+    Optional body params: grid_resolution (default 48),
+    grid_half_extent, sensor_width_mm, consensus_ratio, mask_dilation.
+    """
+    import base64
+
+    job_data = job_manager.get_job(job_id)
+    if not job_data:
+        raise HTTPException(404, "Job not found")
+
+    body = body or {}
+    grid_resolution = int(body.get("grid_resolution", 48))
+    grid_half_extent = float(body.get("grid_half_extent", 1.0))
+    sensor_width_mm = float(body.get("sensor_width_mm", 36.0))
+    consensus_ratio = float(body.get("consensus_ratio", 0.6))
+    mask_dilation = int(body.get("mask_dilation", 15))
+
+    grid_resolution = max(32, min(grid_resolution, 128))
+
+    try:
+        from pipelines.canonical_mv.calibrate import run_calibration_sweep
+
+        sheets = run_calibration_sweep(
+            job_id=job_id,
+            sm=storage_manager,
+            grid_resolution=grid_resolution,
+            grid_half_extent=grid_half_extent,
+            sensor_width_mm=sensor_width_mm,
+            consensus_ratio=consensus_ratio,
+            mask_dilation=mask_dilation,
+        )
+
+        response = {
+            key: base64.b64encode(png).decode("ascii")
+            for key, png in sheets.items()
+        }
+
+        return JSONResponse(content=response)
+
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        logger.error(f"Calibration sweep failed for job {job_id}: {e}", exc_info=True)
+        raise HTTPException(500, f"Calibration sweep failed: {e}")
+
+
+# ===================================================================
 # ENDPOINTS: Output download
 # ===================================================================
 
