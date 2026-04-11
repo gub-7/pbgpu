@@ -65,13 +65,12 @@ EXPECTED_BBOX_IMAGE_RATIO = 0.65
 # anti-parallel to the viewing direction, so look_at() needs a hint
 # to determine the in-plane (roll) orientation.
 #
-# The AI-generated top view has the object's front-to-back axis along
-# the image horizontal and left-to-right along the image vertical.
-# Using [-1, 0, 0] as the up-hint produces:
-#   image right = world +Z (front-back)
-#   image down  = world +X (left-right)
-# which matches the AI image convention.
-TOP_CAMERA_UP_HINT = np.array([-1.0, 0.0, 0.0], dtype=np.float64)
+# Using [0, 0, -1] as the up-hint produces:
+#   image right = world +X (left-to-right)
+#   image down  = world +Z (front at bottom of image)
+# which matches the AI-generated bird's-eye image convention
+# (front-face area at the bottom of the image).
+TOP_CAMERA_UP_HINT = np.array([0.0, 0.0, -1.0], dtype=np.float64)
 
 
 # ---------------------------------------------------------------------------
@@ -122,18 +121,18 @@ def look_at(
         - Y → down
         - Z → forward (into the scene)
 
-    Uses Z-up world convention for better stability with top-down views.
+    Uses Y-up world convention (matching the pipeline's world space).
 
     Args:
         eye: Camera position in world space (3,).
         target: Point the camera looks at (3,).
-        up: World up vector (3,). Defaults to (0, 0, 1) [Z-up].
+        up: World up vector (3,). Defaults to (0, 1, 0) [Y-up].
 
     Returns:
         4×4 world-to-camera matrix (np.float64).
     """
     if up is None:
-        up = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+        up = np.array([0.0, 1.0, 0.0], dtype=np.float64)
 
     eye = np.asarray(eye, dtype=np.float64)
     target = np.asarray(target, dtype=np.float64)
@@ -827,9 +826,9 @@ def _validate_rig(rig: CameraRig) -> None:
                 f"(max deviation={np.max(np.abs(RtR - identity)):.2e})"
             )
 
-        # Check |det(R)| = 1 (orthonormal rotation, det=-1 is expected
-        # because the look_at() maps a right-handed world frame to the
-        # OpenCV camera frame, which requires a reflection)
+        # Check |det(R)| = 1 (orthonormal rotation, det=+1 is expected
+        # because both the Y-up world frame and the OpenCV camera frame
+        # are right-handed, so the mapping is a pure rotation)
         det = np.linalg.det(R)
         if not np.isclose(abs(det), 1.0, atol=1e-6):
             raise ValueError(
