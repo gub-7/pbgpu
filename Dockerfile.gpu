@@ -12,9 +12,16 @@
 #   docker build -f Dockerfile.gpu -t brickedup-gpu .
 #
 # Requires:
-#   - NVIDIA GPU with >=24GB VRAM
-#   - nvidia-container-toolkit
+#   - NVIDIA GPU with >=24GB VRAM (at runtime, NOT at build time)
+#   - nvidia-container-toolkit on the host
 #   - HF_TOKEN env var for gated model access (DINOv3)
+#
+# Note:
+#   TRELLIS.2 CUDA extensions (nvdiffrast, o-voxel, etc.) are built
+#   at first container start via entrypoint.sh, because setup.sh
+#   requires nvidia-smi which is only available at runtime (not during
+#   docker build). A marker file in $STORAGE_ROOT prevents re-building
+#   on subsequent restarts.
 # ─────────────────────────────────────────────────────────────────────
 
 FROM nvidia/cuda:12.4.1-devel-ubuntu22.04
@@ -56,7 +63,7 @@ RUN python -m pip install --no-cache-dir --upgrade pip setuptools wheel
 ENV CUDA_HOME=/usr/local/cuda
 ENV PATH="${CUDA_HOME}/bin:${PATH}"
 ENV LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}"
-# Auto-detect GPU arch at build time; override with --build-arg if needed
+# Target GPU architectures; override with --build-arg if needed
 ARG TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9;9.0"
 ENV TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST}
 
@@ -101,13 +108,25 @@ RUN cd /opt/trellis2 && pip install --no-cache-dir -r requirements.txt 2>/dev/nu
 # Install TRELLIS.2 package
 RUN cd /opt/trellis2 && pip install --no-cache-dir -e . 2>/dev/null || true
 
-# Build custom CUDA extensions (o-voxel, nvdiffrast, etc.)
-# These are needed for mesh extraction from Gaussian representations
+# ---------------------------------------------------------------------------
+# TRELLIS.2 CUDA extensions — SKIPPED during build (no GPU available)
+# ---------------------------------------------------------------------------
+# setup.sh requires nvidia-smi to detect the GPU platform, which is NOT
+# available during `docker build`. We guard on nvidia-smi so the build
+# succeeds cleanly. The actual CUDA extension build happens at first
+# container start via entrypoint.sh (when the NVIDIA runtime exposes
+# the GPU to the container).
 RUN cd /opt/trellis2 && \
-    bash -c 'source ./setup.sh --basic 2>/dev/null || true' && \
-    bash -c 'source ./setup.sh --o-voxel 2>/dev/null || true' && \
-    bash -c 'source ./setup.sh --nvdiffrast 2>/dev/null || true' && \
-    bash -c 'source ./setup.sh --nvdiffrec 2>/dev/null || true'
+    if command -v nvidia-smi >/dev/null 2>&1; then \
+      echo "GPU detected during build -- running setup.sh"; \
+      bash -c 'source ./setup.sh --basic' || true; \
+      bash -c 'source ./setup.sh --o-voxel' || true; \
+      bash -c 'source ./setup.sh --nvdiffrast' || true; \
+      bash -c 'source ./setup.sh --nvdiffrec' || true; \
+    else \
+      echo "No GPU visible during docker build; skipping setup.sh."; \
+      echo "CUDA extensions will be built at first container start."; \
+    fi
 
 # Install flash-attention (needed for TRELLIS transformer backbone)
 RUN pip install --no-cache-dir --no-build-isolation flash-attn==2.7.3 2>/dev/null || \
@@ -126,6 +145,12 @@ COPY preprocessing/ preprocessing/
 COPY pipelines/ pipelines/
 
 # ---------------------------------------------------------------------------
+# Runtime entrypoint (builds TRELLIS CUDA extensions on first start)
+# ---------------------------------------------------------------------------
+COPY entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
+
+# ---------------------------------------------------------------------------
 # Storage directories
 # ---------------------------------------------------------------------------
 RUN mkdir -p /storage/uploads /storage/previews /storage/outputs /storage/artifacts /storage/jobs
@@ -141,6 +166,8 @@ ENV CUDA_VISIBLE_DEVICES=0
 # ENV HF_TOKEN=
 
 EXPOSE 8001
+
+ENTRYPOINT ["/app/entrypoint.sh"]
 
 # Default: run the API server
 CMD ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8001"]
