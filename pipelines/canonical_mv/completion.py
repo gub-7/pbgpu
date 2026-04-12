@@ -12,10 +12,10 @@ Completion strategy:
     1. Compute per-vertex view coverage / confidence
     2. Identify weak regions (vertices seen by < threshold views)
     3. Select and run completion provider:
-       - SymmetryProvider:  mirror observed geometry across symmetry plane
-       - LaplacianProvider: smooth/fill weak regions via Laplacian diffusion
        - Trellis2Provider:  TRELLIS.2 GPU completion (requires GPU)
        - Hunyuan3DProvider: Hunyuan3D GPU completion (requires GPU)
+       - SymmetryProvider:  mirror observed geometry across symmetry plane
+       - LaplacianProvider: smooth/fill weak regions via Laplacian diffusion
     4. Fuse completed geometry into original mesh (only modify low-confidence regions)
 
 Fusion policy (TDD §9.6):
@@ -86,7 +86,7 @@ DEFAULT_DIFFUSION_ALPHA = 0.5
 # Minimum number of weak vertices to trigger completion
 MIN_WEAK_VERTICES_FOR_COMPLETION = 1
 
-# Front-facing dot-product threshold (vertex visible if normal · view_dir > this)
+# Front-facing dot-product threshold (vertex visible if normal . view_dir > this)
 FRONT_FACING_THRESHOLD = -0.1
 
 
@@ -153,11 +153,11 @@ def compute_vertex_visibility(
         vertices: (V, 3) vertex positions.
         normals: (V, 3) vertex normals.
         rig: Calibrated camera rig.
-        masks: Dict mapping view name → binary mask (H, W) uint8.
+        masks: Dict mapping view name -> binary mask (H, W) uint8.
         image_size: (width, height) of the masks.
 
     Returns:
-        Dict mapping view name → (V,) bool array of vertex visibility.
+        Dict mapping view name -> (V,) bool array of vertex visibility.
     """
     w, h = image_size
     n_verts = len(vertices)
@@ -239,7 +239,7 @@ def compute_vertex_confidence(
     normalized so that ``min_views`` views gives confidence 1.0.
 
     Args:
-        visibility: Dict mapping view name → (V,) bool visibility.
+        visibility: Dict mapping view name -> (V,) bool visibility.
         n_vertices: Number of vertices.
         min_views: Number of views for full confidence (1.0).
 
@@ -251,7 +251,7 @@ def compute_vertex_confidence(
     for vis in visibility.values():
         view_count += vis.astype(np.float64)
 
-    # Normalize: min_views views → confidence 1.0
+    # Normalize: min_views views -> confidence 1.0
     confidence = np.clip(view_count / max(min_views, 1), 0.0, 1.0)
 
     return confidence
@@ -269,7 +269,7 @@ def identify_weak_regions(
         threshold: Confidence below this is considered "weak".
 
     Returns:
-        (V,) bool mask — True for weak vertices.
+        (V,) bool mask -- True for weak vertices.
     """
     return confidence < threshold
 
@@ -356,6 +356,287 @@ class CompletionProvider(abc.ABC):
         """
 
 
+class Trellis2CompletionProvider(CompletionProvider):
+    """
+    TRELLIS.2 GPU-based completion provider.
+
+    Uses TRELLIS.2 as a generative prior for completing low-confidence
+    regions.  Requires a GPU and the TRELLIS.2 model checkpoint.
+
+    Approach:
+        1. Pick the best input image (front view preferred).
+        2. Run TRELLIS.2 image-to-3D pipeline to generate a reference mesh.
+        3. Align the TRELLIS mesh to the existing coarse mesh (bounding-box
+           alignment + optional ICP).
+        4. For each weak vertex, find the nearest surface point on the
+           TRELLIS reference mesh and blend toward it.
+
+    The TRELLIS mesh acts as a *geometric prior* -- it provides plausible
+    surface positions for regions the orthographic views did not observe.
+    """
+
+    _pipeline = None  # Class-level singleton to avoid reloading
+
+    def __init__(self, device: str = "cuda"):
+        self._device = device
+
+    @property
+    def name(self) -> str:
+        return "trellis2"
+
+    @classmethod
+    def _load_pipeline(cls, device: str = "cuda"):
+        """
+        Lazily load the TRELLIS.2 pipeline (singleton).
+
+        Raises ImportError if the trellis2 package is not installed.
+        Raises RuntimeError if CUDA is not available.
+        """
+        if cls._pipeline is not None:
+            return cls._pipeline
+
+        import torch
+        if not torch.cuda.is_available() and device == "cuda":
+            raise RuntimeError(
+                "TRELLIS.2 completion requires CUDA but no GPU is available."
+            )
+
+        # Try trellis2 package first, then trellis
+        TrellisImageTo3DPipeline = None
+        try:
+            from trellis2.pipelines import TrellisImageTo3DPipeline
+        except ImportError:
+            pass
+
+        if TrellisImageTo3DPipeline is None:
+            try:
+                from trellis.pipelines import TrellisImageTo3DPipeline
+            except ImportError:
+                raise ImportError(
+                    "TRELLIS.2 package not installed.  Install via:\n"
+                    "  pip install trellis2\n"
+                    "or run gpu-cluster/setup/setup_trellis.sh"
+                )
+
+        logger.info("Loading TRELLIS.2 pipeline for completion...")
+        pipeline = TrellisImageTo3DPipeline.from_pretrained(
+            "JeffreyXiang/TRELLIS-image-large"
+        )
+        pipeline.to(device)
+        cls._pipeline = pipeline
+        logger.info("TRELLIS.2 pipeline loaded successfully")
+        return cls._pipeline
+
+    def complete(
+        self,
+        mesh: MeshState,
+        weak_mask: np.ndarray,
+        confidence: np.ndarray,
+        rig: CameraRig,
+        images: Dict[str, np.ndarray],
+        masks: Dict[str, np.ndarray],
+    ) -> CompletionResult:
+        """
+        Run TRELLIS.2 completion on weak regions.
+
+        Steps:
+            1. Load TRELLIS.2 pipeline (lazy singleton).
+            2. Pick the best input image (front preferred).
+            3. Run TRELLIS.2 to generate a reference mesh.
+            4. Align the reference mesh to the coarse mesh.
+            5. For each weak vertex, find nearest reference surface
+               point and blend.
+        """
+        import torch
+        from PIL import Image as PILImage
+
+        n_verts = len(mesh.vertices)
+        vertices = mesh.vertices.copy()
+        confidence_delta = np.zeros(n_verts, dtype=np.float64)
+
+        # Step 1: Load pipeline
+        pipeline = self._load_pipeline(self._device)
+
+        # Step 2: Pick best input image (front preferred)
+        input_image = None
+        view_used = None
+        for vn in ["front", "side", "top"]:
+            if vn in images:
+                input_image = images[vn]
+                view_used = vn
+                break
+
+        if input_image is None:
+            raise RuntimeError("No input images available for TRELLIS.2 completion")
+
+        # Convert to PIL RGB
+        pil_image = PILImage.fromarray(input_image).convert("RGB")
+
+        logger.info(
+            f"Running TRELLIS.2 on '{view_used}' view "
+            f"({pil_image.size[0]}x{pil_image.size[1]})"
+        )
+
+        # Step 3: Run TRELLIS.2 pipeline
+        with torch.no_grad():
+            outputs = pipeline(
+                image=pil_image,
+                seed=42,
+                sparse_structure_sampler_params={
+                    "steps": 12,
+                    "cfg_strength": 7.5,
+                },
+                slat_sampler_params={
+                    "steps": 12,
+                    "cfg_strength": 7.5,
+                },
+            )
+
+        # Extract the Gaussian representation and mesh
+        gaussian = outputs["gaussian"][0]
+        trellis_mesh_results = pipeline.extract_mesh(
+            gaussian,
+            resolution=512,
+            threshold=0.0,
+        )
+        trellis_mesh = trellis_mesh_results[0]
+
+        # Get vertices from TRELLIS mesh
+        ref_vertices = trellis_mesh.vertices
+        if hasattr(ref_vertices, "cpu"):
+            ref_vertices = ref_vertices.cpu().numpy()
+        ref_vertices = np.asarray(ref_vertices, dtype=np.float64)
+
+        ref_faces = trellis_mesh.faces
+        if hasattr(ref_faces, "cpu"):
+            ref_faces = ref_faces.cpu().numpy()
+
+        logger.info(
+            f"TRELLIS.2 generated reference mesh: "
+            f"{len(ref_vertices)} verts, {len(ref_faces)} faces"
+        )
+
+        if len(ref_vertices) == 0:
+            logger.warning("TRELLIS.2 produced empty mesh, skipping")
+            return CompletionResult(
+                vertices=vertices,
+                confidence_delta=confidence_delta,
+                provider_name=self.name,
+                metadata={"error": "empty_trellis_mesh"},
+            )
+
+        # Step 4: Align reference mesh to coarse mesh
+        ref_vertices = self._align_meshes(mesh.vertices, ref_vertices)
+
+        # Step 5: For each weak vertex, find nearest reference point
+        weak_indices = np.where(weak_mask)[0]
+        n_completed = 0
+
+        if len(weak_indices) > 0 and len(ref_vertices) > 0:
+            # Subsample reference mesh if very large
+            ref_sub = ref_vertices
+            if len(ref_vertices) > 50000:
+                rng = np.random.RandomState(42)
+                idx = rng.choice(len(ref_vertices), 50000, replace=False)
+                ref_sub = ref_vertices[idx]
+
+            # Process in chunks to avoid OOM on large meshes
+            CHUNK_SIZE = 2000
+            bbox_diag = np.linalg.norm(
+                mesh.vertices.max(axis=0) - mesh.vertices.min(axis=0)
+            )
+            threshold = bbox_diag * 0.3
+
+            for chunk_start in range(0, len(weak_indices), CHUNK_SIZE):
+                chunk_end = min(chunk_start + CHUNK_SIZE, len(weak_indices))
+                chunk_wi = weak_indices[chunk_start:chunk_end]
+
+                weak_verts = vertices[chunk_wi]  # (C, 3)
+
+                # (C, R) distance matrix
+                diffs = weak_verts[:, np.newaxis, :] - ref_sub[np.newaxis, :, :]
+                dists = np.linalg.norm(diffs, axis=2)
+
+                closest_idx = np.argmin(dists, axis=1)
+                closest_dist = dists[np.arange(len(chunk_wi)), closest_idx]
+
+                for i, wi in enumerate(chunk_wi):
+                    min_dist = closest_dist[i]
+
+                    if min_dist < threshold:
+                        ref_pos = ref_sub[closest_idx[i]]
+                        inv_conf = 1.0 - confidence[wi]
+                        blend = min(inv_conf * 0.9, MAX_COMPLETION_BLEND)
+
+                        vertices[wi] = (
+                            (1.0 - blend) * vertices[wi] + blend * ref_pos
+                        )
+                        confidence_delta[wi] = blend * 0.8
+                        n_completed += 1
+
+        logger.info(
+            f"TRELLIS.2 completion: {n_completed}/{len(weak_indices)} "
+            f"weak vertices completed"
+        )
+
+        # Clean up GPU memory
+        del outputs, gaussian, trellis_mesh
+        torch.cuda.empty_cache()
+
+        return CompletionResult(
+            vertices=vertices,
+            confidence_delta=confidence_delta,
+            provider_name=self.name,
+            metadata={
+                "n_completed": n_completed,
+                "n_weak": len(weak_indices),
+                "ref_vertices": len(ref_vertices),
+                "view_used": view_used,
+            },
+        )
+
+    @staticmethod
+    def _align_meshes(
+        target_vertices: np.ndarray,
+        source_vertices: np.ndarray,
+    ) -> np.ndarray:
+        """
+        Align source mesh to target mesh via bounding-box alignment.
+
+        Translates and scales the source mesh so that its bounding box
+        center and extent match the target mesh.
+
+        Args:
+            target_vertices: (V1, 3) target mesh vertices.
+            source_vertices: (V2, 3) source mesh vertices to align.
+
+        Returns:
+            (V2, 3) aligned source vertices.
+        """
+        # Target bounding box
+        t_min = target_vertices.min(axis=0)
+        t_max = target_vertices.max(axis=0)
+        t_center = (t_min + t_max) / 2.0
+        t_extent = t_max - t_min
+        t_scale = np.max(t_extent)
+
+        # Source bounding box
+        s_min = source_vertices.min(axis=0)
+        s_max = source_vertices.max(axis=0)
+        s_center = (s_min + s_max) / 2.0
+        s_extent = s_max - s_min
+        s_scale = np.max(s_extent)
+
+        if s_scale < 1e-10:
+            return source_vertices
+
+        # Scale and translate
+        scale_factor = t_scale / s_scale
+        aligned = (source_vertices - s_center) * scale_factor + t_center
+
+        return aligned
+
+
 class SymmetryCompletionProvider(CompletionProvider):
     """
     Complete weak regions by mirroring geometry from the observed side.
@@ -423,7 +704,6 @@ class SymmetryCompletionProvider(CompletionProvider):
             min_dist = dists[closest_idx]
 
             # Only mirror if the reflected vertex is reasonably close
-            # (within 2x the median edge length)
             if min_dist < 0.5:  # reasonable threshold for normalized meshes
                 # Blend: move weak vertex toward the mirrored position
                 mirrored_pos = reflected[closest_idx]
@@ -511,8 +791,8 @@ class LaplacianCompletionProvider(CompletionProvider):
             neighbors[int(e[0])].append(int(e[1]))
             neighbors[int(e[1])].append(int(e[0]))
 
-        # Iterative Laplacian diffusion — only move weak vertices
-        for iteration in range(self.n_iterations):
+        # Iterative Laplacian diffusion -- only move weak vertices
+        for _iteration in range(self.n_iterations):
             new_verts = vertices.copy()
 
             for vi in np.where(weak_mask)[0]:
@@ -565,42 +845,6 @@ class LaplacianCompletionProvider(CompletionProvider):
         )
 
 
-class Trellis2CompletionProvider(CompletionProvider):
-    """
-    TRELLIS.2 GPU-based completion provider.
-
-    Uses TRELLIS.2 as a generative prior for completing low-confidence
-    regions. Requires a GPU and the TRELLIS.2 model checkpoint.
-
-    This provider is a stub — actual GPU inference is deferred to the
-    worker environment where the model is loaded.
-    """
-
-    @property
-    def name(self) -> str:
-        return "trellis2"
-
-    def complete(
-        self,
-        mesh: MeshState,
-        weak_mask: np.ndarray,
-        confidence: np.ndarray,
-        rig: CameraRig,
-        images: Dict[str, np.ndarray],
-        masks: Dict[str, np.ndarray],
-    ) -> CompletionResult:
-        """
-        Run TRELLIS.2 completion.
-
-        Raises:
-            RuntimeError: If TRELLIS.2 is not available in this environment.
-        """
-        raise RuntimeError(
-            "TRELLIS.2 completion requires GPU and model checkpoint. "
-            "Set use_trellis_completion=False or ensure the model is loaded."
-        )
-
-
 class Hunyuan3DCompletionProvider(CompletionProvider):
     """
     Hunyuan3D GPU-based completion provider.
@@ -608,7 +852,7 @@ class Hunyuan3DCompletionProvider(CompletionProvider):
     Uses Hunyuan3D 2.x as a generative prior for completing
     low-confidence regions. Requires a GPU and the Hunyuan3D checkpoint.
 
-    This provider is a stub — actual GPU inference is deferred to the
+    This provider is a stub -- actual GPU inference is deferred to the
     worker environment where the model is loaded.
     """
 
@@ -646,7 +890,7 @@ def get_completion_providers(
     Providers are tried in order:
         1. TRELLIS.2 (if enabled)
         2. Hunyuan3D (if enabled)
-        3. Symmetry (if enabled — always available as CPU fallback)
+        3. Symmetry (if enabled -- always available as CPU fallback)
         4. Laplacian (always available as final CPU fallback)
 
     Args:
@@ -710,8 +954,8 @@ def fuse_completion(
         return original_mesh.copy()
 
     # Compute per-vertex blend weight:
-    # - High confidence → low blend (preserve original)
-    # - Low confidence → high blend (accept completion)
+    # - High confidence -> low blend (preserve original)
+    # - Low confidence -> high blend (accept completion)
     # - Only blend in weak regions
     blend_weights = np.zeros(n_verts, dtype=np.float64)
     blend_weights[weak_mask] = np.clip(
@@ -802,7 +1046,7 @@ def run_complete_geometry(
     rig_data = sm.load_artifact_json(job_id, "camera_init.json")
     if rig_data is None:
         raise ValueError(
-            "camera_init.json not found — initialize_cameras must run first"
+            "camera_init.json not found -- initialize_cameras must run first"
         )
     rig = CameraRig.from_dict(rig_data)
     image_size = tuple(rig.shared_params["image_size"])
@@ -819,7 +1063,7 @@ def run_complete_geometry(
         mesh_source = "coarse"
     if mesh_path is None:
         raise ValueError(
-            "No mesh found — refine_joint or reconstruct_coarse must run first"
+            "No mesh found -- refine_joint or reconstruct_coarse must run first"
         )
 
     vertices, faces, normals = load_mesh_ply(str(mesh_path))
@@ -887,7 +1131,6 @@ def run_complete_geometry(
             f"[{job_id}] complete_geometry: only {n_weak} weak vertices, "
             f"skipping completion"
         )
-        # No completion needed — mesh is already well-observed
         completed_mesh = mesh.copy()
         completion_result = CompletionResult(
             vertices=mesh.vertices.copy(),
@@ -926,7 +1169,6 @@ def run_complete_geometry(
                 })
 
         if completion_result is None:
-            # All providers failed — use identity (no change)
             logger.warning(
                 f"[{job_id}] complete_geometry: all providers failed, "
                 f"using original mesh"
@@ -939,9 +1181,7 @@ def run_complete_geometry(
             )
             completed_mesh = mesh.copy()
         else:
-            # ----------------------------------------------------------
-            # Step 6: Fuse completed geometry
-            # ----------------------------------------------------------
+            # Fuse completed geometry
             completed_mesh = fuse_completion(
                 mesh, completion_result, confidence, weak_mask,
                 max_blend=comp_config.max_blend_weight,
@@ -952,7 +1192,6 @@ def run_complete_geometry(
     # ------------------------------------------------------------------
     # Step 7: Save artifacts
     # ------------------------------------------------------------------
-    # Completed mesh
     completed_mesh_path = sm.get_artifact_dir(job_id) / "completed_mesh.ply"
     save_mesh_ply(
         str(completed_mesh_path),

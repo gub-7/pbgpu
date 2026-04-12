@@ -228,15 +228,17 @@ class CanonicalMVOrchestrator:
     def _should_skip_stage(self, stage_name: str) -> bool:
         """
         Check if a stage should be skipped based on pipeline config.
+
+        Note: complete_geometry is NEVER skipped because symmetry and
+        laplacian completion providers are always available as CPU
+        fallbacks, even when GPU providers (TRELLIS, Hunyuan) are
+        disabled.
         """
         if stage_name == JobStage.REFINE_JOINT.value:
             return not self.config.use_joint_refinement
 
-        if stage_name == JobStage.COMPLETE_GEOMETRY.value:
-            return (
-                not self.config.use_trellis_completion
-                and not self.config.use_hunyuan_completion
-            )
+        # complete_geometry always runs -- symmetry + laplacian fallbacks
+        # are always available regardless of GPU provider config.
 
         return False
 

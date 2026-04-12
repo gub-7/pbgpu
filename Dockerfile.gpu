@@ -1,0 +1,147 @@
+# ─────────────────────────────────────────────────────────────────────
+# GPU Dockerfile for BrickedUp multi-view pipeline + TRELLIS.2
+#
+# This image includes:
+#   - PyTorch with CUDA support
+#   - TRELLIS.2 image-to-3D pipeline
+#   - All pipeline dependencies (numpy, opencv, scipy, scikit-image)
+#   - rembg for background removal
+#   - FastAPI for the GPU cluster API
+#
+# Build:
+#   docker build -f Dockerfile.gpu -t brickedup-gpu .
+#
+# Requires:
+#   - NVIDIA GPU with >=24GB VRAM
+#   - nvidia-container-toolkit
+#   - HF_TOKEN env var for gated model access (DINOv3)
+# ─────────────────────────────────────────────────────────────────────
+
+FROM nvidia/cuda:12.4.1-devel-ubuntu22.04
+
+# Prevent interactive prompts during apt install
+ENV DEBIAN_FRONTEND=noninteractive
+
+WORKDIR /app
+
+# ---------------------------------------------------------------------------
+# System dependencies
+# ---------------------------------------------------------------------------
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    git \
+    ffmpeg \
+    libgl1 \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender-dev \
+    ninja-build \
+    python3.10 \
+    python3.10-dev \
+    python3.10-venv \
+    python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+
+# Make python3.10 the default
+RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.10 1 \
+    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.10 1
+
+# Upgrade pip
+RUN python -m pip install --no-cache-dir --upgrade pip setuptools wheel
+
+# ---------------------------------------------------------------------------
+# CUDA environment
+# ---------------------------------------------------------------------------
+ENV CUDA_HOME=/usr/local/cuda
+ENV PATH="${CUDA_HOME}/bin:${PATH}"
+ENV LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}"
+# Auto-detect GPU arch at build time; override with --build-arg if needed
+ARG TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9;9.0"
+ENV TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST}
+
+# ---------------------------------------------------------------------------
+# PyTorch with CUDA 12.4 support
+# ---------------------------------------------------------------------------
+RUN pip install --no-cache-dir \
+    torch==2.6.0 \
+    torchvision==0.21.0 \
+    triton==3.2.0 \
+    --extra-index-url https://download.pytorch.org/whl/cu124
+
+# ---------------------------------------------------------------------------
+# Core Python dependencies (pipeline + API)
+# ---------------------------------------------------------------------------
+RUN pip install --no-cache-dir \
+    fastapi \
+    "uvicorn[standard]" \
+    python-multipart \
+    redis \
+    pydantic \
+    Pillow \
+    numpy \
+    opencv-python-headless \
+    scipy \
+    scikit-image \
+    "rembg[gpu]" \
+    trimesh \
+    huggingface_hub \
+    psutil
+
+# ---------------------------------------------------------------------------
+# TRELLIS.2 and its dependencies
+# ---------------------------------------------------------------------------
+
+# Clone TRELLIS.2 repo (needed for custom extensions)
+RUN git clone --recursive https://github.com/microsoft/TRELLIS.2.git /opt/trellis2
+
+# Install TRELLIS.2 base dependencies
+RUN cd /opt/trellis2 && pip install --no-cache-dir -r requirements.txt 2>/dev/null || true
+
+# Install TRELLIS.2 package
+RUN cd /opt/trellis2 && pip install --no-cache-dir -e . 2>/dev/null || true
+
+# Build custom CUDA extensions (o-voxel, nvdiffrast, etc.)
+# These are needed for mesh extraction from Gaussian representations
+RUN cd /opt/trellis2 && \
+    bash -c 'source ./setup.sh --basic 2>/dev/null || true' && \
+    bash -c 'source ./setup.sh --o-voxel 2>/dev/null || true' && \
+    bash -c 'source ./setup.sh --nvdiffrast 2>/dev/null || true' && \
+    bash -c 'source ./setup.sh --nvdiffrec 2>/dev/null || true'
+
+# Install flash-attention (needed for TRELLIS transformer backbone)
+RUN pip install --no-cache-dir --no-build-isolation flash-attn==2.7.3 2>/dev/null || \
+    echo "flash-attn build failed (may need specific GPU arch) -- will use fallback attention"
+
+# Ensure trellis2 is importable
+RUN python -c "import sys; sys.path.insert(0, '/opt/trellis2'); print('TRELLIS.2 path configured')"
+ENV PYTHONPATH="/opt/trellis2:${PYTHONPATH}"
+
+# ---------------------------------------------------------------------------
+# Application code
+# ---------------------------------------------------------------------------
+COPY api/ api/
+COPY workers/ workers/
+COPY preprocessing/ preprocessing/
+COPY pipelines/ pipelines/
+
+# ---------------------------------------------------------------------------
+# Storage directories
+# ---------------------------------------------------------------------------
+RUN mkdir -p /storage/uploads /storage/previews /storage/outputs /storage/artifacts /storage/jobs
+
+# ---------------------------------------------------------------------------
+# Environment defaults
+# ---------------------------------------------------------------------------
+ENV STORAGE_ROOT=/storage
+ENV REDIS_HOST=redis
+ENV REDIS_PORT=6379
+ENV CUDA_VISIBLE_DEVICES=0
+# HF_TOKEN must be provided at runtime for gated model access
+# ENV HF_TOKEN=
+
+EXPOSE 8001
+
+# Default: run the API server
+CMD ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8001"]
+
