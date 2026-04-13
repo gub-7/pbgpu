@@ -1,7 +1,7 @@
 # GPU Cluster Multi-View Reconstruction – Docker Image
 # Requires NVIDIA Container Toolkit for GPU access.
 
-FROM nvidia/cuda:12.4.1-devel-ubuntu24.04
+FROM nvidia/cuda:12.4.1-devel-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
