@@ -16,11 +16,11 @@ if ! pgrep -x "redis-server" > /dev/null 2>&1; then
 fi
 
 # Ensure storage directories exist
-python -c "from pipelines.config import ensure_directories; ensure_directories()"
+python3 -c "from pipelines.config import ensure_directories; ensure_directories()"
 
 # Start the canonical MV worker in the background
 echo "Starting canonical MV worker..."
-python -m workers.canonical_mv_worker &
+python3 -m workers.canonical_mv_worker &
 WORKER_PID=$!
 echo "Worker PID: $WORKER_PID"
 
