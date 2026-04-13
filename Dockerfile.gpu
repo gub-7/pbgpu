@@ -1,36 +1,84 @@
 # GPU Cluster Multi-View Reconstruction – Docker Image
+# Installs PyTorch + MASt3R (includes DUSt3R) + CroCo CUDA extensions.
 # Requires NVIDIA Container Toolkit for GPU access.
+#
+# Build:
+#   docker build -f Dockerfile.gpu -t gpu-cluster .
+#
+# Run:
+#   docker run --gpus all -p 8001:8001 \
+#     -v model-cache:/app/model_cache \
+#     -e HF_TOKEN=hf_xxx \
+#     gpu-cluster
 
 FROM nvidia/cuda:12.4.1-devel-ubuntu22.04
 
+# ── Build args ──────────────────────────────────────────────────────
+# Override TORCH_CUDA_ARCH_LIST for your GPU (e.g. "8.9" for Ada).
+# Default covers Volta → Ada → Hopper.
+ARG TORCH_CUDA_ARCH_LIST="7.0;7.5;8.0;8.6;8.9;9.0"
+
+# ── Environment ─────────────────────────────────────────────────────
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
 ENV CUDA_HOME=/usr/local/cuda
+ENV TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST}
+# HuggingFace cache → persistent volume mount
+ENV HF_HOME=/app/model_cache/huggingface
+ENV TORCH_HOME=/app/model_cache/torch
 
-# System dependencies
+# ── System dependencies ─────────────────────────────────────────────
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 python3-pip python3-venv python3-dev \
-    git build-essential pkg-config \
+    git build-essential pkg-config ninja-build cmake \
     ffmpeg libgl1 libglib2.0-0 \
     libegl1 libgles2 libosmesa6 \
     redis-server \
     ca-certificates curl wget \
     && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /app
+# python → python3 symlink (many scripts expect bare "python")
+RUN ln -sf /usr/bin/python3 /usr/bin/python
 
-# Python dependencies
+# Upgrade pip tooling
+RUN pip3 install --no-cache-dir --upgrade pip setuptools wheel
+
+# ── PyTorch (CUDA 12.4) ─────────────────────────────────────────────
+# Installed first for Docker layer caching (rarely changes).
+RUN pip3 install --no-cache-dir \
+    torch==2.6.0 torchvision==0.21.0 \
+    --extra-index-url https://download.pytorch.org/whl/cu124
+
+# ── MASt3R + DUSt3R ─────────────────────────────────────────────────
+# MASt3R repo includes DUSt3R as a git submodule.
+# Installing both as editable packages makes `import dust3r` and
+# `import mast3r` work from anywhere.
+RUN git clone --recursive https://github.com/naver/mast3r /opt/mast3r
+
+# Install Python deps (MASt3R's requirements + DUSt3R's requirements)
+RUN cd /opt/mast3r && \
+    pip3 install --no-cache-dir -r requirements.txt && \
+    pip3 install --no-cache-dir -r dust3r/requirements.txt
+
+# Install as editable packages so imports work globally
+RUN pip3 install --no-cache-dir -e /opt/mast3r/dust3r/ && \
+    pip3 install --no-cache-dir -e /opt/mast3r/
+
+# Build CroCo CUDA RoPE extension (optional but faster at runtime)
+RUN cd /opt/mast3r/dust3r/croco/models/curope && \
+    python3 setup.py build_ext --inplace
+
+# ── Application dependencies ────────────────────────────────────────
+WORKDIR /app
 COPY requirements.txt /app/requirements.txt
 RUN pip3 install --no-cache-dir -r requirements.txt
 
-# Copy application code
+# ── Application code ────────────────────────────────────────────────
 COPY . /app
-
-# Make scripts executable
 RUN chmod +x entrypoint.sh start_services.sh stop_services.sh
 
-# Create storage directories
-RUN mkdir -p storage logs model_cache
+# Create storage / cache directories (may be overlaid by volumes)
+RUN mkdir -p storage logs model_cache/huggingface model_cache/torch
 
 EXPOSE 8001
 

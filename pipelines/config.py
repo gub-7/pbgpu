@@ -33,15 +33,20 @@ MODEL_CACHE_DIR = Path(os.getenv("MODEL_CACHE_DIR", str(PROJECT_ROOT / "model_ca
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
 # ---------------------------------------------------------------------------
-# External model paths (set via env on the GPU host)
+# External model paths
 # ---------------------------------------------------------------------------
 
-# DUSt3R / MASt3R checkpoints
+# DUSt3R / MASt3R checkpoints.
+# Default to HuggingFace model IDs so `from_pretrained()` auto-downloads
+# the weights on first use.  Override with a local file path if you
+# pre-downloaded checkpoints (e.g. via setup/setup_dust3r.sh).
 DUST3R_CHECKPOINT = os.getenv(
-    "DUST3R_CHECKPOINT", str(MODEL_CACHE_DIR / "DUSt3R_ViTLarge_BaseDecoder_512_dpt.pth")
+    "DUST3R_CHECKPOINT",
+    "naver/DUSt3R_ViTLarge_BaseDecoder_512_dpt",
 )
 MAST3R_CHECKPOINT = os.getenv(
-    "MAST3R_CHECKPOINT", str(MODEL_CACHE_DIR / "MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth")
+    "MAST3R_CHECKPOINT",
+    "naver/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric",
 )
 
 # TRELLIS.2 repo location (setup by setup/setup_trellis.sh)
