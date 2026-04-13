@@ -1,2 +1,0 @@
-PATCH 1: Add import and constants to workers/triposr_worker.py
-

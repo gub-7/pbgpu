@@ -3,87 +3,46 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-pip-wheel-metadata/
-share/python-wheels/
 *.egg-info/
-.installed.cfg
+dist/
+build/
 *.egg
-MANIFEST
 
 # Virtual environments
 venv/
+.venv/
 env/
-ENV/
-env.bak/
-venv.bak/
 
-# IDEs
+# IDE
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
-.DS_Store
 
-# Environment files
+# Environment
 .env
-.env.local
 
-# Storage directories
-storage/uploads/*
-storage/previews/*
-storage/outputs/*
-storage/jobs/*
-
-# Keep directory structure
-!storage/uploads/.gitkeep
-!storage/previews/.gitkeep
-!storage/outputs/.gitkeep
-!storage/jobs/.gitkeep
-
-# Model caches
-*.ckpt
-*.pth
-*.safetensors
-models/
-checkpoints/
-external/
-
-# Logs
-*.log
+# Storage (runtime data)
+storage/
 logs/
+model_cache/
 
-# Redis
-dump.rdb
+# Model checkpoints
+*.pth
+*.ckpt
+*.safetensors
+*.bin
 
 # OS
-Thumbs.db
 .DS_Store
+Thumbs.db
 
-# Jupyter
-.ipynb_checkpoints/
+# Docker
+docker-compose.override.yml
 
-# Testing
+# Pytest
 .pytest_cache/
-.coverage
 htmlcov/
-
-# Backend (old structure)
-backend/
-
-# Conda
-*.tar.bz2
+.coverage
 
