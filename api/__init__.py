@@ -2,6 +2,14 @@
 GPU-cluster 3D reconstruction API package.
 
 Re-exports key models, enums, and service classes for convenience.
+
+NOTE: JobManager is intentionally NOT imported here to avoid a circular
+import.  The chain would be:
+    pipelines.__init__  →  pipelines.camera_init  →  api.models
+    →  (triggers api.__init__)  →  api.job_manager
+    →  pipelines.camera_init  (still initialising → ImportError)
+Import JobManager directly where needed:
+    from api.job_manager import JobManager
 """
 
 from .models import (
@@ -31,8 +39,6 @@ from .models import (
     JobDetailResponse,
 )
 
-from .job_manager import JobManager
-
 __all__ = [
     # Enums
     "ViewLabel",
@@ -58,7 +64,5 @@ __all__ = [
     "CreateJobRequest",
     "JobStatusResponse",
     "JobDetailResponse",
-    # Services
-    "JobManager",
 ]
 

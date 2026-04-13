@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from api import storage as storage_mod
 from api.storage import (
     StorageError,
     create_job_storage,
@@ -21,8 +22,11 @@ from pipelines import config as cfg
 @pytest.fixture(autouse=True)
 def use_tmp_storage(tmp_path, monkeypatch):
     """Redirect storage to a temp directory for all tests."""
-    monkeypatch.setattr(cfg, "STORAGE_ROOT", tmp_path / "storage")
-    (tmp_path / "storage").mkdir()
+    tmp_storage = tmp_path / "storage"
+    tmp_storage.mkdir()
+    # Patch both the canonical source and the already-imported binding
+    monkeypatch.setattr(cfg, "STORAGE_ROOT", tmp_storage)
+    monkeypatch.setattr(storage_mod, "STORAGE_ROOT", tmp_storage)
 
 
 class TestCreateJobStorage:

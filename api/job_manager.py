@@ -26,7 +26,6 @@ from api.models import (
     ViewSpec,
 )
 from api.storage import create_job_storage, get_job_dir
-from pipelines.camera_init import get_canonical_views
 from pipelines.config import REDIS_URL, get_default_pipeline_config
 
 logger = logging.getLogger(__name__)
@@ -82,6 +81,11 @@ class JobManager:
         ----------
         config : optional pipeline configuration override
         """
+        # Lazy import to avoid circular dependency:
+        #   pipelines.camera_init → api.models → (triggers api.__init__)
+        #   → api.job_manager → pipelines.camera_init (still initialising)
+        from pipelines.camera_init import get_canonical_views
+
         cfg = config or get_default_pipeline_config()
 
         job = ReconJob(config=cfg)
