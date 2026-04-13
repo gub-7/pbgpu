@@ -32,7 +32,7 @@ RUN chmod +x entrypoint.sh start_services.sh stop_services.sh
 # Create storage directories
 RUN mkdir -p storage logs model_cache
 
-EXPOSE 8000
+EXPOSE 8001
 
 ENTRYPOINT ["./entrypoint.sh"]
 

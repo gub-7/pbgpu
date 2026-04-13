@@ -4,6 +4,8 @@
 
 set -e
 
+PORT="${PORT:-8001}"
+
 echo "=========================================="
 echo "GPU Cluster Multi-View Reconstruction"
 echo "=========================================="
@@ -25,6 +27,6 @@ WORKER_PID=$!
 echo "Worker PID: $WORKER_PID"
 
 # Start the API server (foreground)
-echo "Starting API server on port 8000..."
-exec uvicorn api.main:app --host 0.0.0.0 --port 8000
+echo "Starting API server on port ${PORT}..."
+exec uvicorn api.main:app --host 0.0.0.0 --port "${PORT}"
 

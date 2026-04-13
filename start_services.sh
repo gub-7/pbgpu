@@ -40,6 +40,9 @@ if [ -f .env ]; then
     set +a
 fi
 
+# API port – matches docker-compose.gpu.yml and backend GPU_CLUSTER_URL
+PORT="${PORT:-8001}"
+
 echo ""
 echo "Starting services in background..."
 echo "Logs will be written to logs/"
@@ -49,11 +52,11 @@ echo ""
 TRIPOSR_VENV="${TRIPOSR_VENV:-/root/venvs/triposr}"
 
 # Start API server
-echo "Starting API server (port 8000)..."
+echo "Starting API server (port ${PORT})..."
 if [ -d "$TRIPOSR_VENV" ]; then
     source "$TRIPOSR_VENV/bin/activate"
 fi
-uvicorn api.main:app --host 0.0.0.0 --port 8000 > logs/api.log 2>&1 &
+uvicorn api.main:app --host 0.0.0.0 --port "${PORT}" > logs/api.log 2>&1 &
 API_PID=$!
 echo "API server started (PID: $API_PID)"
 
@@ -74,8 +77,8 @@ echo "=========================================="
 echo "All services started!"
 echo "=========================================="
 echo ""
-echo "API:             http://localhost:8000"
-echo "API docs:        http://localhost:8000/docs"
+echo "API:             http://localhost:${PORT}"
+echo "API docs:        http://localhost:${PORT}/docs"
 echo ""
 echo "Pipeline: preprocessing → camera init → coarse recon → isolation → trellis"
 echo ""
