@@ -26,6 +26,9 @@ ENV TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST}
 # HuggingFace cache → persistent volume mount
 ENV HF_HOME=/app/model_cache/huggingface
 ENV TORCH_HOME=/app/model_cache/torch
+# MASt3R / DUSt3R are not pip-installable packages; add them to
+# PYTHONPATH so `import mast3r` and `import dust3r` resolve globally.
+ENV PYTHONPATH="/opt/mast3r:/opt/mast3r/dust3r:${PYTHONPATH}"
 
 # ── System dependencies ─────────────────────────────────────────────
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -51,8 +54,8 @@ RUN pip3 install --no-cache-dir \
 
 # ── MASt3R + DUSt3R ─────────────────────────────────────────────────
 # MASt3R repo includes DUSt3R as a git submodule.
-# Installing both as editable packages makes `import dust3r` and
-# `import mast3r` work from anywhere.
+# These are NOT pip-installable; we clone, install their requirements,
+# and rely on PYTHONPATH (set above) for imports.
 RUN git clone --recursive https://github.com/naver/mast3r /opt/mast3r
 
 # Install Python deps (MASt3R's requirements + DUSt3R's requirements)
@@ -60,9 +63,17 @@ RUN cd /opt/mast3r && \
     pip3 install --no-cache-dir -r requirements.txt && \
     pip3 install --no-cache-dir -r dust3r/requirements.txt
 
-# Install as editable packages so imports work globally
-RUN pip3 install --no-cache-dir -e /opt/mast3r/dust3r/ && \
-    pip3 install --no-cache-dir -e /opt/mast3r/
+# Optional DUSt3R dependencies (non-fatal if some fail)
+RUN cd /opt/mast3r && \
+    pip3 install --no-cache-dir -r dust3r/requirements_optional.txt || true
+
+# ── ASMK (required by MASt3R for retrieval) ─────────────────────────
+RUN pip3 install --no-cache-dir cython && \
+    git clone https://github.com/jenicek/asmk /opt/asmk && \
+    cd /opt/asmk/cython && \
+    cythonize *.pyx && \
+    cd /opt/asmk && \
+    pip3 install --no-cache-dir .
 
 # Build CroCo CUDA RoPE extension (optional but faster at runtime)
 RUN cd /opt/mast3r/dust3r/croco/models/curope && \
