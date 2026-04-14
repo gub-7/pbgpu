@@ -68,12 +68,13 @@ RUN cd /opt/mast3r && \
     pip3 install --no-cache-dir -r dust3r/requirements_optional.txt || true
 
 # ── ASMK (required by MASt3R for retrieval) ─────────────────────────
-RUN pip3 install --no-cache-dir cython && \
+RUN pip3 install --no-cache-dir faiss-gpu-cu12 cython pyaml && \
     git clone https://github.com/jenicek/asmk /opt/asmk && \
     cd /opt/asmk/cython && \
     cythonize *.pyx && \
     cd /opt/asmk && \
-    pip3 install --no-cache-dir .
+    python3 setup.py build_ext --inplace && \
+    python3 setup.py install
 
 # Build CroCo CUDA RoPE extension (optional but faster at runtime)
 RUN cd /opt/mast3r/dust3r/croco/models/curope && \
