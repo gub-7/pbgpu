@@ -13,26 +13,26 @@
 
 FROM nvidia/cuda:12.4.1-devel-ubuntu22.04
 
-# ── Build args ──────────────────────────────────────────────────────
+# -- Build args -----------------------------------------------------------
 # Override TORCH_CUDA_ARCH_LIST for your GPU (e.g. "8.9" for Ada).
-# Default covers Volta → Ada → Hopper.
+# Default covers Volta -> Ada -> Hopper.
 ARG TORCH_CUDA_ARCH_LIST="7.0;7.5;8.0;8.6;8.9;9.0"
 
-# ── Environment ─────────────────────────────────────────────────────
+# -- Environment ----------------------------------------------------------
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
 ENV CUDA_HOME=/usr/local/cuda
 ENV TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST}
-# HuggingFace cache → persistent volume mount
+# HuggingFace cache -> persistent volume mount
 ENV HF_HOME=/app/model_cache/huggingface
 ENV TORCH_HOME=/app/model_cache/torch
 # MASt3R / DUSt3R are not pip-installable packages; add them to
 # PYTHONPATH so `import mast3r` and `import dust3r` resolve globally.
-# NOTE: Do NOT append ${PYTHONPATH} here — it is undefined at build
+# NOTE: Do NOT append ${PYTHONPATH} here -- it is undefined at build
 # time and causes a Docker warning + broken path.
 ENV PYTHONPATH="/opt/mast3r:/opt/mast3r/dust3r"
 
-# ── System dependencies ─────────────────────────────────────────────
+# -- System dependencies --------------------------------------------------
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 python3-pip python3-venv python3-dev \
     git build-essential pkg-config ninja-build cmake \
@@ -42,24 +42,34 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl wget \
     && rm -rf /var/lib/apt/lists/*
 
-# python → python3 symlink (many scripts expect bare "python")
+# python -> python3 symlink (many scripts expect bare "python")
 RUN ln -sf /usr/bin/python3 /usr/bin/python
 
 # Upgrade pip tooling
 RUN pip3 install --no-cache-dir --upgrade pip setuptools wheel
 
-# ── PyTorch (CUDA 12.4) ─────────────────────────────────────────────
+# -- PyTorch (CUDA 12.4) --------------------------------------------------
 # Installed first for Docker layer caching (rarely changes).
 RUN pip3 install --no-cache-dir \
     torch==2.6.0 torchvision==0.21.0 \
     --extra-index-url https://download.pytorch.org/whl/cu124
 
-# ── MASt3R + DUSt3R ─────────────────────────────────────────────────
+# -- MASt3R + DUSt3R ------------------------------------------------------
 # MASt3R repo includes DUSt3R as a git submodule.
 # These are NOT pip-installable (no setup.py / pyproject.toml);
 # we clone, install their requirements, and rely on PYTHONPATH
 # (set above) for `import mast3r` / `import dust3r`.
 RUN git clone --recursive https://github.com/naver/mast3r /opt/mast3r
+
+# Persist import paths via a .pth file so Python can always find
+# MASt3R / DUSt3R even if runtime PYTHONPATH gets overridden.
+RUN python3 -c "\
+import site; \
+pth = site.getsitepackages()[0] + '/mast3r_dust3r.pth'; \
+f = open(pth, 'w'); \
+f.write('/opt/mast3r\n/opt/mast3r/dust3r\n'); \
+f.close(); \
+print('Installed import path file:', pth)"
 
 # Install Python deps (MASt3R's requirements + DUSt3R's requirements)
 RUN cd /opt/mast3r && \
@@ -70,7 +80,7 @@ RUN cd /opt/mast3r && \
 RUN cd /opt/mast3r && \
     pip3 install --no-cache-dir -r dust3r/requirements_optional.txt || true
 
-# ── ASMK (required by MASt3R for retrieval) ─────────────────────────
+# -- ASMK (required by MASt3R for retrieval) ------------------------------
 RUN pip3 install --no-cache-dir faiss-gpu-cu12 cython pyaml && \
     git clone https://github.com/jenicek/asmk /opt/asmk && \
     cd /opt/asmk/cython && \
@@ -83,27 +93,27 @@ RUN pip3 install --no-cache-dir faiss-gpu-cu12 cython pyaml && \
 RUN cd /opt/mast3r/dust3r/croco/models/curope && \
     python3 setup.py build_ext --inplace || true
 
-# ── Build-time sanity check ─────────────────────────────────────────
-# Fail the build immediately if imports are broken, instead of
-# discovering it at runtime.
-RUN python3 -c "import sys; print('PYTHONPATH:', sys.path)" && \
-    python3 -c "import dust3r; print('dust3r import OK')" && \
-    python3 -c "from dust3r.model import AsymmetricCroCo3DStereo; print('DUSt3R model class OK')" && \
-    python3 -c "import mast3r; print('mast3r import OK')" && \
-    python3 -c "from mast3r.model import AsymmetricMASt3R; print('MASt3R model class OK')" && \
-    python3 -c "import asmk; print('ASMK import OK')"
-
-# ── Application dependencies ────────────────────────────────────────
+# -- Application dependencies ---------------------------------------------
 WORKDIR /app
 COPY requirements.txt /app/requirements.txt
 RUN pip3 install --no-cache-dir -r requirements.txt
 
-# ── Application code ────────────────────────────────────────────────
+# -- Application code -----------------------------------------------------
 COPY . /app
 RUN chmod +x entrypoint.sh start_services.sh stop_services.sh
 
 # Create storage / cache directories (may be overlaid by volumes)
 RUN mkdir -p storage logs model_cache/huggingface model_cache/torch
+
+# -- Build-time sanity check -----------------------------------------------
+# Placed at the very end so it validates the final runtime environment
+# (after all COPY, chmod, and mkdir layers).
+RUN python3 -c "import os, sys; print('PYTHONPATH env =', os.environ.get('PYTHONPATH')); print('sys.path =', sys.path)" && \
+    python3 -c "import dust3r; print('dust3r import OK')" && \
+    python3 -c "from dust3r.model import AsymmetricCroCo3DStereo; print('DUSt3R model class OK')" && \
+    python3 -c "import mast3r; print('mast3r import OK')" && \
+    python3 -c "from mast3r.model import AsymmetricMASt3R; print('MASt3R model class OK')" && \
+    python3 -c "import asmk; print('ASMK import OK')"
 
 EXPOSE 8001
 

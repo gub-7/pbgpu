@@ -115,11 +115,8 @@ class DUSt3RBackend:
             self._model = self._model.to(self.device)
             self._model.eval()
             logger.info("DUSt3R model loaded successfully")
-        except ImportError:
-            logger.error(
-                "DUSt3R is not installed. Install from: "
-                "https://github.com/naver/dust3r"
-            )
+        except Exception as e:
+            logger.exception("DUSt3R import/load failed: %r", e)
             raise
 
         return self._model
@@ -296,11 +293,8 @@ class MASt3RBackend:
             self._model = self._model.to(self.device)
             self._model.eval()
             logger.info("MASt3R model loaded successfully")
-        except ImportError:
-            logger.error(
-                "MASt3R is not installed. Install from: "
-                "https://github.com/naver/mast3r"
-            )
+        except Exception as e:
+            logger.exception("MASt3R import/load failed: %r", e)
             raise
 
         return self._model
@@ -432,11 +426,8 @@ class VGGTBackend:
             self._model = self._model.to(self.device)
             self._model.eval()
             logger.info("VGGT model loaded successfully")
-        except ImportError:
-            logger.error(
-                "VGGT is not installed. Install from: "
-                "https://github.com/facebookresearch/vggt"
-            )
+        except Exception as e:
+            logger.exception("VGGT import/load failed: %r", e)
             raise
 
         return self._model
