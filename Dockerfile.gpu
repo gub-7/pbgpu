@@ -28,7 +28,9 @@ ENV HF_HOME=/app/model_cache/huggingface
 ENV TORCH_HOME=/app/model_cache/torch
 # MASt3R / DUSt3R are not pip-installable packages; add them to
 # PYTHONPATH so `import mast3r` and `import dust3r` resolve globally.
-ENV PYTHONPATH="/opt/mast3r:/opt/mast3r/dust3r:${PYTHONPATH}"
+# NOTE: Do NOT append ${PYTHONPATH} here — it is undefined at build
+# time and causes a Docker warning + broken path.
+ENV PYTHONPATH="/opt/mast3r:/opt/mast3r/dust3r"
 
 # ── System dependencies ─────────────────────────────────────────────
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -54,8 +56,9 @@ RUN pip3 install --no-cache-dir \
 
 # ── MASt3R + DUSt3R ─────────────────────────────────────────────────
 # MASt3R repo includes DUSt3R as a git submodule.
-# These are NOT pip-installable; we clone, install their requirements,
-# and rely on PYTHONPATH (set above) for imports.
+# These are NOT pip-installable (no setup.py / pyproject.toml);
+# we clone, install their requirements, and rely on PYTHONPATH
+# (set above) for `import mast3r` / `import dust3r`.
 RUN git clone --recursive https://github.com/naver/mast3r /opt/mast3r
 
 # Install Python deps (MASt3R's requirements + DUSt3R's requirements)
@@ -68,17 +71,25 @@ RUN cd /opt/mast3r && \
     pip3 install --no-cache-dir -r dust3r/requirements_optional.txt || true
 
 # ── ASMK (required by MASt3R for retrieval) ─────────────────────────
-RUN pip3 install --no-cache-dir faiss-gpu-cu12 cython pyaml && \
+RUN pip3 install --no-cache-dir cython && \
     git clone https://github.com/jenicek/asmk /opt/asmk && \
     cd /opt/asmk/cython && \
     cythonize *.pyx && \
     cd /opt/asmk && \
-    python3 setup.py build_ext --inplace && \
-    python3 setup.py install
+    pip3 install --no-cache-dir .
 
 # Build CroCo CUDA RoPE extension (optional but faster at runtime)
 RUN cd /opt/mast3r/dust3r/croco/models/curope && \
     python3 setup.py build_ext --inplace
+
+# ── Build-time sanity check ─────────────────────────────────────────
+# Fail the build immediately if imports are broken, instead of
+# discovering it at runtime.
+RUN python3 -c "import sys; print('PYTHONPATH:', sys.path)" && \
+    python3 -c "import dust3r; print('dust3r import OK')" && \
+    python3 -c "from dust3r.model import AsymmetricCroCo3DStereo; print('DUSt3R model class OK')" && \
+    python3 -c "import mast3r; print('mast3r import OK')" && \
+    python3 -c "from mast3r.model import AsymmetricMASt3R; print('MASt3R model class OK')"
 
 # ── Application dependencies ────────────────────────────────────────
 WORKDIR /app

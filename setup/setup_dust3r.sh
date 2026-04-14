@@ -7,6 +7,10 @@ set -euo pipefail
 # MASt3R includes DUSt3R as a submodule, so installing MASt3R gives
 # you both `import mast3r` and `import dust3r`.
 #
+# Neither MASt3R nor DUSt3R are pip-installable (no setup.py /
+# pyproject.toml).  We clone the repo, install requirements, build
+# CUDA extensions, and add the repo paths to PYTHONPATH.
+#
 # Prerequisites:
 #   - NVIDIA GPU with driver installed (nvidia-smi works)
 #   - CUDA toolkit 12.x installed (nvcc works)
@@ -87,6 +91,20 @@ fi
 
 cd "$MAST3R_DIR"
 
+# ── Set PYTHONPATH ───────────────────────────────────────────────
+# MASt3R and DUSt3R are NOT pip-installable (no setup.py / pyproject.toml).
+# We add the repo paths to PYTHONPATH so `import mast3r` and `import dust3r`
+# resolve globally.  This matches the approach used in Dockerfile.gpu.
+export PYTHONPATH="$MAST3R_DIR:$MAST3R_DIR/dust3r${PYTHONPATH:+:$PYTHONPATH}"
+log "PYTHONPATH set to: $PYTHONPATH"
+
+# Persist PYTHONPATH for future shell sessions
+PROFILE_SCRIPT="/etc/profile.d/mast3r.sh"
+log "Writing PYTHONPATH to $PROFILE_SCRIPT"
+cat > "$PROFILE_SCRIPT" <<EOF
+export PYTHONPATH="$MAST3R_DIR:$MAST3R_DIR/dust3r\${PYTHONPATH:+:\$PYTHONPATH}"
+EOF
+
 # ── Install Python dependencies ──────────────────────────────────
 log "Installing MASt3R Python requirements"
 pip3 install --no-cache-dir -r requirements.txt
@@ -94,12 +112,25 @@ pip3 install --no-cache-dir -r requirements.txt
 log "Installing DUSt3R Python requirements"
 pip3 install --no-cache-dir -r dust3r/requirements.txt
 
-# ── Install as editable packages ─────────────────────────────────
-log "Installing DUSt3R package (editable)"
-pip3 install --no-cache-dir -e dust3r/
+log "Installing DUSt3R optional requirements (non-fatal)"
+pip3 install --no-cache-dir -r dust3r/requirements_optional.txt || true
 
-log "Installing MASt3R package (editable)"
-pip3 install --no-cache-dir -e .
+# ── ASMK (required by MASt3R for retrieval) ──────────────────────
+log "Installing ASMK"
+pip3 install --no-cache-dir cython
+
+if [ -d "/opt/asmk/.git" ]; then
+    log "ASMK already cloned at /opt/asmk"
+else
+    git clone https://github.com/jenicek/asmk /opt/asmk
+fi
+
+cd /opt/asmk/cython
+cythonize *.pyx
+cd /opt/asmk
+pip3 install --no-cache-dir .
+
+cd "$MAST3R_DIR"
 
 # ── Build CroCo CUDA RoPE extension ─────────────────────────────
 log "Building CroCo/curope CUDA extension"
@@ -133,6 +164,9 @@ fi
 # ── Smoke test ───────────────────────────────────────────────────
 log "Smoke test: importing dust3r and mast3r"
 python3 -c "
+import sys
+print('PYTHONPATH:', sys.path)
+
 import dust3r
 print('dust3r imported OK')
 from dust3r.model import AsymmetricCroCo3DStereo
@@ -145,6 +179,9 @@ print('MASt3R model class imported OK')
 "
 
 log "DONE – MASt3R + DUSt3R installed at $MAST3R_DIR"
+echo ""
+echo "PYTHONPATH has been persisted to $PROFILE_SCRIPT"
+echo "For new shell sessions, run: source $PROFILE_SCRIPT"
 echo ""
 echo "Usage:"
 echo "  # DUSt3R (auto-downloads checkpoint from HuggingFace on first use):"
