@@ -176,7 +176,10 @@ class DUSt3RBackend:
         output = inference(pairs, model, self.device, batch_size=1)
 
         # Global alignment
-        logger.info("Running global alignment (PairViewer mode for 3 views)")
+        logger.info(
+            "Running global alignment (PointCloudOptimizer mode for %d views)",
+            len(imgs),
+        )
         scene = global_aligner(
             output,
             device=self.device,
@@ -187,19 +190,28 @@ class DUSt3RBackend:
         known_focals = [v.intrinsics.fx for v in resolved_views]
         scene.preset_focal(known_focals)
 
-        # Build known pose matrices for prior injection
-        known_poses = []
+        # Build known pose matrices (cam-to-world) for prior injection.
+        # DUSt3R expects cam-to-world poses; our extrinsics store w2c,
+        # so we invert each 4×4 matrix.
+        known_poses_c2w = []
         for v in resolved_views:
-            R = np.array(v.extrinsics.R_w2c).reshape(3, 3)
-            t = np.array(v.extrinsics.t_w2c)
-            pose_4x4 = np.eye(4)
-            pose_4x4[:3, :3] = R
-            pose_4x4[:3, 3] = t
-            known_poses.append(pose_4x4)
+            R_w2c = np.array(v.extrinsics.R_w2c).reshape(3, 3)
+            t_w2c = np.array(v.extrinsics.t_w2c)
+            w2c = np.eye(4)
+            w2c[:3, :3] = R_w2c
+            w2c[:3, 3] = t_w2c
+            # Invert to get cam-to-world (DUSt3R convention)
+            c2w = np.linalg.inv(w2c)
+            known_poses_c2w.append(c2w)
 
-        # Run alignment optimisation
+        # Inject known poses into the scene so DUSt3R treats them as fixed.
+        # This sets requires_grad=False on im_poses, which is what
+        # init_from_known_poses() checks via get_known_poses().
+        scene.preset_pose(known_poses_c2w)
+
+        # Run alignment optimisation with known-pose initialisation
         loss = scene.compute_global_alignment(
-            init="known_poses" if known_poses else "mst",
+            init="known_poses",
             niter=300,
             schedule="cosine",
             lr=0.01,
