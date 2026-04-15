@@ -114,7 +114,14 @@ class PipelineOrchestrator:
             self._stage_isolation()
 
             if self.job.config.trellis_enabled:
-                self._stage_trellis()
+                try:
+                    self._stage_trellis()
+                except PipelineError as e:
+                    # TRELLIS.2 is optional – degrade gracefully so the
+                    # pipeline still delivers coarse-recon + isolation output.
+                    logger.warning(
+                        "Trellis.2 completion unavailable, skipping: %s", e,
+                    )
 
             self._update_status(JobStatus.COMPLETED)
 

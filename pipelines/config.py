@@ -30,7 +30,9 @@ MODEL_CACHE_DIR = Path(os.getenv("MODEL_CACHE_DIR", str(PROJECT_ROOT / "model_ca
 # Redis
 # ---------------------------------------------------------------------------
 
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+_redis_host = os.getenv("REDIS_HOST", "localhost")
+_redis_port = os.getenv("REDIS_PORT", "6379")
+REDIS_URL = os.getenv("REDIS_URL", f"redis://{_redis_host}:{_redis_port}/0")
 
 # ---------------------------------------------------------------------------
 # External model paths
@@ -67,7 +69,7 @@ SUPPORTED_IMAGE_FORMATS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tiff"}
 # ---------------------------------------------------------------------------
 
 USE_BACKGROUND_FOR_POSE = os.getenv("USE_BACKGROUND_FOR_POSE", "true").lower() == "true"
-TRELLIS_ENABLED = os.getenv("TRELLIS_ENABLED", "true").lower() == "true"
+TRELLIS_ENABLED = os.getenv("TRELLIS_ENABLED", "false").lower() == "true"
 DEFAULT_RECON_BACKEND = ReconBackend(os.getenv("DEFAULT_RECON_BACKEND", "dust3r"))
 DEFAULT_MASK_METHOD = os.getenv("DEFAULT_MASK_METHOD", "rembg")
 
