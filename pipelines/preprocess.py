@@ -1,18 +1,23 @@
 """
 Image preprocessing for the multi-view reconstruction pipeline.
 
-Handles:
-  - Image validation (format, dimensions, corruption)
-  - Resizing to the pipeline's expected square dimension
-  - Colour-space normalisation
-  - Optional EXIF orientation correction
-  - Symlink/copy into the job workspace
+Pipeline order (revised):
+  1. Validate image (format, dimensions, corruption)
+  2. EXIF orientation correction + convert to RGB
+  3. **Background removal** (rembg) → place subject on flat gray canvas
+  4. Resize to the pipeline's expected square dimension
+  5. Save to the job workspace
+
+Background removal happens *first* because every downstream stage
+(view normalisation, fiducial markers, coarse reconstruction, Trellis)
+operates on background-free images.  The gray canvas
+(BACKGROUND_GRAY) gives DUSt3R / MASt3R a uniform, low-texture
+background that won't generate spurious correspondences.
 """
 
 from __future__ import annotations
 
 import logging
-import shutil
 from pathlib import Path
 from typing import Optional
 
@@ -23,6 +28,11 @@ from api.models import ViewLabel, ViewSpec
 from pipelines.config import DEFAULT_IMAGE_SIZE, SUPPORTED_IMAGE_FORMATS
 
 logger = logging.getLogger(__name__)
+
+# Flat gray used as the background after rembg removal.
+# Mid-gray is chosen so it doesn't bias colour statistics and is
+# visually distinct from both the subject and the fiducial markers.
+BACKGROUND_GRAY = (180, 180, 180)
 
 
 class PreprocessingError(Exception):
@@ -80,6 +90,60 @@ def validate_image_dimensions(
 
 
 # ---------------------------------------------------------------------------
+# Background removal
+# ---------------------------------------------------------------------------
+
+
+def remove_background(img: Image.Image) -> Image.Image:
+    """
+    Remove background using rembg and place subject on flat gray canvas.
+
+    Returns an RGB image with the subject on BACKGROUND_GRAY.
+    """
+    try:
+        from rembg import remove
+    except ImportError:
+        logger.warning(
+            "rembg not installed – falling back to threshold-based masking. "
+            "Install with: pip install rembg[gpu]"
+        )
+        return _remove_background_threshold(img)
+
+    # rembg returns RGBA with alpha as the foreground mask
+    img_rgb = img.convert("RGB")
+    result_rgba = remove(img_rgb)
+
+    if result_rgba.mode != "RGBA":
+        result_rgba = result_rgba.convert("RGBA")
+
+    # Composite onto gray canvas
+    canvas = Image.new("RGB", img_rgb.size, BACKGROUND_GRAY)
+    canvas.paste(result_rgba, mask=result_rgba.split()[-1])
+
+    return canvas
+
+
+def _remove_background_threshold(img: Image.Image) -> Image.Image:
+    """
+    Fallback background removal using simple white-threshold masking.
+
+    Assumes a predominantly white background.
+    """
+    arr = np.array(img.convert("RGB"), dtype=np.float32)
+    # Pixels far from white are likely foreground
+    dist = np.sqrt(((arr - 255.0) ** 2).sum(axis=2))
+    mask = (dist > 30).astype(np.uint8) * 255
+
+    mask_img = Image.fromarray(mask, mode="L")
+    rgba = img.convert("RGB").copy()
+    rgba.putalpha(mask_img)
+
+    canvas = Image.new("RGB", img.size, BACKGROUND_GRAY)
+    canvas.paste(rgba, mask=mask_img)
+    return canvas
+
+
+# ---------------------------------------------------------------------------
 # Transforms
 # ---------------------------------------------------------------------------
 
@@ -90,10 +154,10 @@ def resize_to_square(
     resample: int = Image.LANCZOS,
 ) -> Image.Image:
     """
-    Resize an image to a square canvas, padding with white if needed.
+    Resize an image to a square canvas, padding with gray if needed.
 
     If the image is already square, it is simply resized.
-    Otherwise, the image is centred on a white square canvas and then
+    Otherwise the image is centred on a gray square canvas and then
     resized to the target dimension.
     """
     w, h = img.size
@@ -103,7 +167,7 @@ def resize_to_square(
 
     # Pad to square first
     side = max(w, h)
-    canvas = Image.new("RGB", (side, side), (255, 255, 255))
+    canvas = Image.new("RGB", (side, side), BACKGROUND_GRAY)
     offset_x = (side - w) // 2
     offset_y = (side - h) // 2
     canvas.paste(img, (offset_x, offset_y))
@@ -117,10 +181,8 @@ def normalise_image(img: Image.Image) -> Image.Image:
       - EXIF orientation correction
       - Convert to RGB (drop alpha)
     """
-    # Fix EXIF rotation
     img = ImageOps.exif_transpose(img)
 
-    # Ensure RGB
     if img.mode != "RGB":
         img = img.convert("RGB")
 
@@ -141,9 +203,10 @@ def preprocess_single_image(
     Full preprocessing pipeline for one image.
 
     1. Validate
-    2. Load and normalise
-    3. Resize to square
-    4. Save to dst_path as PNG
+    2. Load and normalise (EXIF, RGB)
+    3. Remove background → flat gray canvas
+    4. Resize to square
+    5. Save to dst_path as PNG
 
     Returns the output path.
     """
@@ -152,6 +215,7 @@ def preprocess_single_image(
 
     with Image.open(src_path) as img:
         img = normalise_image(img)
+        img = remove_background(img)
         img = resize_to_square(img, target_size)
 
     # Always save as PNG for lossless downstream processing
@@ -159,7 +223,10 @@ def preprocess_single_image(
     dst_path.parent.mkdir(parents=True, exist_ok=True)
     img.save(dst_path, format="PNG")
 
-    logger.info("Preprocessed %s → %s (%dx%d)", src_path.name, dst_path, target_size, target_size)
+    logger.info(
+        "Preprocessed %s → %s (%dx%d, bg removed)",
+        src_path.name, dst_path, target_size, target_size,
+    )
     return dst_path
 
 
@@ -179,6 +246,9 @@ def preprocess_views(
 
     Images are read from input_dir/{view.image_filename} and written to
     output_dir/{label}.png.
+
+    Background is removed and images are placed on a flat gray canvas
+    so that every downstream stage works on clean, background-free images.
 
     Parameters
     ----------
@@ -205,11 +275,16 @@ def preprocess_views(
         updated_specs.append(updated)
 
     logger.info(
-        "Preprocessed %d views → %s",
+        "Preprocessed %d views → %s (backgrounds removed)",
         len(updated_specs),
         output_dir,
     )
     return updated_specs
+
+
+# ---------------------------------------------------------------------------
+# Numpy helpers (used by downstream stages)
+# ---------------------------------------------------------------------------
 
 
 def image_to_numpy(path: Path) -> np.ndarray:

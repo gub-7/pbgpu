@@ -24,20 +24,15 @@ We enforce these by *shrinking* the subject in whichever view is too
 large, never enlarging.  The target for each shared dimension is the
 minimum of the two measurements.
 
-Subject resizing method
------------------------
-Images must remain the same pixel size (DUSt3R/MASt3R require uniform
-dimensions).  To shrink a subject:
-
-1. Segment the subject and find its bounding box.
-2. Cut the subject out, resize it to the target dimensions.
-3. Place it back, centred in the image.
-4. Fill the gap between the old background edge and the new subject
-   using a **trapezoid warp**: draw diagonals from the four image
-   corners to the four corners of the new subject bbox, creating four
-   trapezoids (top, bottom, left, right).  Perspective-warp each
-   original background strip into its new (larger) trapezoid so the
-   background stretches smoothly inward to meet the resized subject.
+Simplified for gray-background images
+--------------------------------------
+Because background removal happens before normalization, the background
+is always a flat gray canvas (BACKGROUND_GRAY from preprocess.py).
+This means we do NOT need complex trapezoid warping to fill gaps.
+Instead, we simply:
+  1. Crop the subject from the image
+  2. Resize the crop to the target dimensions
+  3. Paste it centred onto a fresh gray canvas
 """
 
 from __future__ import annotations
@@ -50,38 +45,37 @@ import numpy as np
 from PIL import Image
 
 from api.models import ViewLabel, ViewSpec
+from pipelines.preprocess import BACKGROUND_GRAY
 
 logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Bounding-box detection
+# Bounding-box detection (simplified for gray-background images)
 # ---------------------------------------------------------------------------
 
 
 def _get_subject_mask(image: Image.Image) -> np.ndarray:
     """
-    Generate a binary foreground mask for the subject.
+    Generate a binary foreground mask by thresholding against the known
+    gray background colour.
+
+    Since preprocessing has already removed the background and placed
+    the subject on BACKGROUND_GRAY, we don't need rembg here – a simple
+    colour-distance threshold suffices.
 
     Returns an (H, W) uint8 array: 255 = foreground, 0 = background.
     """
-    try:
-        from rembg import remove
+    arr = np.array(image.convert("RGB"), dtype=np.float32)
+    bg = np.array(BACKGROUND_GRAY, dtype=np.float32)
 
-        rgba = remove(image.convert("RGB"))
-        if rgba.mode == "RGBA":
-            alpha = np.array(rgba.split()[-1])
-        else:
-            alpha = np.array(rgba.convert("L"))
-        mask = (alpha > 128).astype(np.uint8) * 255
-    except ImportError:
-        # Fallback: simple white-background threshold
-        logger.warning("rembg not available, falling back to threshold masking")
-        arr = np.array(image.convert("RGB"), dtype=np.float32)
-        # Pixels far from white are likely foreground
-        dist = np.sqrt(((arr - 255.0) ** 2).sum(axis=2))
-        mask = (dist > 30).astype(np.uint8) * 255
+    # Per-pixel distance from the known background colour
+    dist = np.sqrt(((arr - bg) ** 2).sum(axis=2))
 
+    # Anything more than 15 units from the background is foreground.
+    # This threshold is intentionally low because the background is a
+    # known exact colour, not a noisy photograph.
+    mask = (dist > 15).astype(np.uint8) * 255
     return mask
 
 
@@ -169,50 +163,8 @@ def compute_target_dimensions(
 
 
 # ---------------------------------------------------------------------------
-# Trapezoid background warp
+# Subject resize (simplified for gray background)
 # ---------------------------------------------------------------------------
-
-
-def _perspective_warp_region(
-    src_img: np.ndarray,
-    src_quad: np.ndarray,
-    dst_quad: np.ndarray,
-    output_shape: tuple[int, int],
-) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Perspective-warp a quadrilateral region from *src_img*.
-
-    Parameters
-    ----------
-    src_img : (H, W, C) source image
-    src_quad : (4, 2) float32 – corners in the source image
-    dst_quad : (4, 2) float32 – corresponding corners in the output image
-    output_shape : (H, W) of the output canvas
-
-    Returns
-    -------
-    warped : (H, W, C) – the warped image (zeros outside the quad)
-    mask   : (H, W) uint8 – 255 inside the warped quad, 0 outside
-    """
-    import cv2
-
-    M = cv2.getPerspectiveTransform(
-        src_quad.astype(np.float32),
-        dst_quad.astype(np.float32),
-    )
-    H_out, W_out = output_shape
-    warped = cv2.warpPerspective(
-        src_img, M, (W_out, H_out),
-        flags=cv2.INTER_LINEAR,
-        borderMode=cv2.BORDER_REFLECT_101,
-    )
-
-    # Build a mask for the destination quadrilateral
-    mask = np.zeros((H_out, W_out), dtype=np.uint8)
-    pts = dst_quad.astype(np.int32).reshape((-1, 1, 2))
-    cv2.fillConvexPoly(mask, pts, 255)
-
-    return warped, mask
 
 
 def resize_subject_in_image(
@@ -222,14 +174,16 @@ def resize_subject_in_image(
     target_h: int,
 ) -> Image.Image:
     """
-    Shrink the subject within *image* to (target_w, target_h) and fill
-    the background gap using trapezoid warping.
+    Shrink the subject within *image* to (target_w, target_h) and
+    re-centre on a fresh gray canvas.
 
-    The image pixel dimensions are preserved.
+    Because the background is a flat gray, we don't need any complex
+    warping – just crop the subject, resize it, and paste onto a new
+    gray canvas of the same image dimensions.
 
     Parameters
     ----------
-    image : original image (RGB, square)
+    image : original image (RGB, square, gray background)
     orig_bbox : (x1, y1, x2, y2) tight bounding box of the subject
     target_w : desired subject width  (≤ orig bbox width)
     target_h : desired subject height (≤ orig bbox height)
@@ -237,10 +191,8 @@ def resize_subject_in_image(
     Returns
     -------
     A new PIL Image of the same size with the resized subject centred
-    and the background smoothly stretched to fill gaps.
+    on a gray canvas.
     """
-    import cv2
-
     W, H = image.size
     ox1, oy1, ox2, oy2 = orig_bbox
     orig_w = ox2 - ox1
@@ -255,116 +207,23 @@ def resize_subject_in_image(
     tw = min(target_w, orig_w)
     th = min(target_h, orig_h)
 
-    # New bbox – centred in the image
-    nx1 = (W - tw) // 2
-    ny1 = (H - th) // 2
-    nx2 = nx1 + tw
-    ny2 = ny1 + th
+    # Crop the subject from the original image
+    subject_crop = image.crop((ox1, oy1, ox2, oy2))
 
-    src_arr = np.array(image)  # (H, W, 3) or (H, W, 4)
-    channels = src_arr.shape[2] if src_arr.ndim == 3 else 1
+    # Resize the crop to target dimensions
+    resized_subject = subject_crop.resize((tw, th), Image.LANCZOS)
 
-    # --- 1. Resize the subject crop ---
-    subject_crop = src_arr[oy1:oy2, ox1:ox2]
-    resized_subject = cv2.resize(
-        subject_crop, (tw, th), interpolation=cv2.INTER_AREA,
-    )
+    # Create a fresh gray canvas and paste the resized subject centred
+    canvas = Image.new("RGB", (W, H), BACKGROUND_GRAY)
+    paste_x = (W - tw) // 2
+    paste_y = (H - th) // 2
+    canvas.paste(resized_subject, (paste_x, paste_y))
 
-    # --- 2. Build output canvas ---
-    out = np.zeros_like(src_arr)
-
-    # Place resized subject
-    out[ny1:ny2, nx1:nx2] = resized_subject
-
-    # --- 3. Warp the four background trapezoids ---
-    # Each trapezoid maps an original background strip to its new
-    # (larger) region.  Corners are listed in consistent winding order.
-
-    # Original background quad corners (in source image)
-    # New (destination) quad corners (in output image)
-    # The diagonals go from each image corner to the corresponding
-    # new-subject-bbox corner.
-
-    trapezoids = [
-        # TOP trapezoid
-        {
-            "src": np.array(
-                [[0, 0], [W, 0], [ox2, oy1], [ox1, oy1]], dtype=np.float32
-            ),
-            "dst": np.array(
-                [[0, 0], [W, 0], [nx2, ny1], [nx1, ny1]], dtype=np.float32
-            ),
-        },
-        # BOTTOM trapezoid
-        {
-            "src": np.array(
-                [[ox1, oy2], [ox2, oy2], [W, H], [0, H]], dtype=np.float32
-            ),
-            "dst": np.array(
-                [[nx1, ny2], [nx2, ny2], [W, H], [0, H]], dtype=np.float32
-            ),
-        },
-        # LEFT trapezoid
-        {
-            "src": np.array(
-                [[0, 0], [ox1, oy1], [ox1, oy2], [0, H]], dtype=np.float32
-            ),
-            "dst": np.array(
-                [[0, 0], [nx1, ny1], [nx1, ny2], [0, H]], dtype=np.float32
-            ),
-        },
-        # RIGHT trapezoid
-        {
-            "src": np.array(
-                [[ox2, oy1], [W, 0], [W, H], [ox2, oy2]], dtype=np.float32
-            ),
-            "dst": np.array(
-                [[nx2, ny1], [W, 0], [W, H], [nx2, ny2]], dtype=np.float32
-            ),
-        },
-    ]
-
-    for trap in trapezoids:
-        warped, mask = _perspective_warp_region(
-            src_arr, trap["src"], trap["dst"], (H, W),
-        )
-        # Composite: only write where the output is still empty
-        # (the subject region is already filled)
-        fill_mask = (mask > 0) & (
-            np.all(out == 0, axis=2) if out.ndim == 3 else (out == 0)
-        )
-        if out.ndim == 3:
-            out[fill_mask] = warped[fill_mask]
-        else:
-            out[fill_mask] = warped[fill_mask]
-
-    # Fill any remaining zero pixels (corner gaps, etc.) with nearest
-    # non-zero content to avoid black seams.
-    if out.ndim == 3:
-        gray = np.any(out > 0, axis=2).astype(np.uint8)
-    else:
-        gray = (out > 0).astype(np.uint8)
-
-    if not gray.all():
-        # Use inpaint-like nearest fill for tiny gaps
-        missing = gray == 0
-        # Simple approach: flood from the subject outward
-        from scipy.ndimage import distance_transform_edt
-
-        _, indices = distance_transform_edt(missing, return_indices=True)
-        if out.ndim == 3:
-            for c in range(out.shape[2]):
-                channel = out[:, :, c]
-                out[:, :, c] = channel[indices[0], indices[1]]
-        else:
-            out[:] = out[indices[0], indices[1]]
-
-    result = Image.fromarray(out)
     logger.info(
         "Resized subject from %dx%d to %dx%d (image stays %dx%d)",
         orig_w, orig_h, tw, th, W, H,
     )
-    return result
+    return canvas
 
 
 # ---------------------------------------------------------------------------
@@ -452,9 +311,8 @@ def normalize_views(
             logger.info("View %s: already consistent – skipping", label.value)
             # Still copy to output_dir if different from image_dir
             if output_dir != image_dir:
-                src = image_dir / by_label[label].image_filename
-                dst = output_dir / by_label[label].image_filename
-                images[label].save(dst)
+                out_path = output_dir / by_label[label].image_filename
+                images[label].save(out_path)
             continue
 
         logger.info(

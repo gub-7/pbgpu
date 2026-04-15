@@ -2,17 +2,22 @@
 Pipeline orchestrator: coordinates the full reconstruction workflow.
 
 Stages executed in order:
-  1. PREPROCESSING  – validate, resize, normalise input images
-  1b. VIEW_NORM    – cross-view subject size normalization
-  2. CAMERA_INIT    – resolve canonical view poses to COLMAP extrinsics
-  3. COARSE_RECON   – dense geometry from full images (WITH background)
-  4. ISOLATION      – remove background from images + filter 3D points
-  5. TRELLIS        – generative completion to produce final 3D asset
-  6. EXPORT         – package results for downstream consumption
+  1. PREPROCESSING  - validate, remove background, resize, normalise
+  2. VIEW_NORM      - cross-view subject size normalization
+  3. FIDUCIAL       - add reference geometry (orange squares + blue circle)
+  4. CAMERA_INIT    - resolve canonical view poses to COLMAP extrinsics
+  5. COARSE_RECON   - dense geometry from images WITH fiducial markers
+  6. ISOLATION      - strip marker geometry from 3D point cloud
+  7. TRELLIS        - generative completion on CLEAN images (no markers)
+  8. EXPORT         - package results for downstream consumption
 
-The orchestrator updates the ReconJob model at each stage, persists
-intermediate results, and handles errors gracefully so that partial
-results are preserved.
+Key design decisions:
+  - Background removal happens FIRST (stage 1) so that every downstream
+    stage works on clean, gray-background images.
+  - Fiducial markers are rendered onto COPIES of the preprocessed images.
+    The originals (without markers) are preserved for Trellis.
+  - DUSt3R / MASt3R receive images WITH markers for better correspondences.
+  - After coarse recon, marker geometry is stripped from the point cloud.
 """
 
 from __future__ import annotations
@@ -88,6 +93,7 @@ class PipelineOrchestrator:
         )
         self.input_dir = self.job_dir / "input"
         self.preprocessed_dir = self.job_dir / "preprocessed"
+        self.marked_dir = self.job_dir / "marked"       # images WITH fiducial markers
         self.recon_dir = self.job_dir / "coarse_recon"
         self.isolation_dir = self.job_dir / "isolation"
         self.trellis_dir = self.job_dir / "trellis"
@@ -101,7 +107,7 @@ class PipelineOrchestrator:
         if error:
             self.job.error_message = error
         self.on_status_change(self.job)
-        logger.info("Job %s → %s", self.job.job_id, status.value)
+        logger.info("Job %s -> %s", self.job.job_id, status.value)
 
     def run(self) -> ReconJob:
         """
@@ -112,6 +118,7 @@ class PipelineOrchestrator:
         try:
             self._stage_preprocess()
             self._stage_view_normalize()
+            self._stage_fiducial_markers()
             self._stage_camera_init()
             self._stage_coarse_recon()
             self._stage_isolation()
@@ -120,7 +127,7 @@ class PipelineOrchestrator:
                 try:
                     self._stage_trellis()
                 except PipelineError as e:
-                    # TRELLIS.2 is optional – degrade gracefully so the
+                    # TRELLIS.2 is optional - degrade gracefully so the
                     # pipeline still delivers coarse-recon + isolation output.
                     logger.warning(
                         "Trellis.2 completion unavailable, skipping: %s", e,
@@ -143,13 +150,18 @@ class PipelineOrchestrator:
         return self.job
 
     # ------------------------------------------------------------------
-    # Stage 1: Preprocessing
+    # Stage 1: Preprocessing (includes background removal)
     # ------------------------------------------------------------------
 
     def _stage_preprocess(self) -> None:
-        """Validate and preprocess input images."""
+        """
+        Validate and preprocess input images.
+
+        Background removal happens here so every downstream stage
+        works on clean, gray-background images.
+        """
         self._update_status(JobStatus.PREPROCESSING)
-        logger.info("Stage 1: Preprocessing %d views", len(self.job.views))
+        logger.info("Stage 1: Preprocessing %d views (bg removal included)", len(self.job.views))
 
         if not self.job.views:
             raise PipelineError(
@@ -184,13 +196,13 @@ class PipelineOrchestrator:
             raise PipelineError("preprocessing", str(e) or repr(e)) from e
 
     # ------------------------------------------------------------------
-    # Stage 1b: Cross-view subject normalization
+    # Stage 2: Cross-view subject normalization
     # ------------------------------------------------------------------
 
     def _stage_view_normalize(self) -> None:
         """Normalize subject sizes across views for 3D consistency."""
         self._update_status(JobStatus.VIEW_NORMALIZATION)
-        logger.info("Stage 1b: Cross-view subject normalization")
+        logger.info("Stage 2: Cross-view subject normalization")
 
         try:
             from pipelines.view_normalization import normalize_views
@@ -203,13 +215,40 @@ class PipelineOrchestrator:
             raise PipelineError("view_normalization", str(e) or repr(e)) from e
 
     # ------------------------------------------------------------------
-    # Stage 2: Camera Initialisation
+    # Stage 3: Fiducial markers
+    # ------------------------------------------------------------------
+
+    def _stage_fiducial_markers(self) -> None:
+        """
+        Add reference geometry to view images for DUSt3R / MASt3R.
+
+        Renders orange squares and a blue circle at known 3D positions
+        onto copies of the preprocessed images.  The originals in
+        preprocessed_dir are preserved (clean, no markers) for Trellis.
+        """
+        self._update_status(JobStatus.FIDUCIAL_MARKERS)
+        logger.info("Stage 3: Adding fiducial markers for reconstruction")
+
+        try:
+            from pipelines.fiducial_markers import add_fiducial_markers
+
+            add_fiducial_markers(
+                view_specs=self.job.views,
+                image_dir=self.preprocessed_dir,
+                output_dir=self.marked_dir,
+                intrinsics=self.job.config.intrinsics,
+            )
+        except Exception as e:
+            raise PipelineError("fiducial_markers", str(e) or repr(e)) from e
+
+    # ------------------------------------------------------------------
+    # Stage 4: Camera Initialisation
     # ------------------------------------------------------------------
 
     def _stage_camera_init(self) -> None:
         """Resolve canonical poses to full extrinsics."""
         self._update_status(JobStatus.CAMERA_INIT)
-        logger.info("Stage 2: Camera initialisation")
+        logger.info("Stage 4: Camera initialisation")
 
         try:
             resolved = resolve_views(
@@ -225,25 +264,25 @@ class PipelineOrchestrator:
             raise PipelineError("camera_init", str(e) or repr(e)) from e
 
     # ------------------------------------------------------------------
-    # Stage 3: Coarse Reconstruction
+    # Stage 5: Coarse Reconstruction
     # ------------------------------------------------------------------
 
     def _stage_coarse_recon(self) -> None:
         """
-        Run dense geometry reconstruction using full (with-background) images.
+        Run dense geometry reconstruction using images WITH fiducial markers.
 
-        This is the key principle: use background for geometry estimation.
+        The markers provide strong multi-view correspondences that help
+        DUSt3R / MASt3R produce better geometry with only 3 views.
         """
         self._update_status(JobStatus.COARSE_RECON)
         logger.info(
-            "Stage 3: Coarse reconstruction (backend=%s, with_background=%s)",
+            "Stage 5: Coarse reconstruction (backend=%s, using marked images)",
             self.job.config.recon_backend.value,
-            self.job.config.use_background_for_pose,
         )
 
-        # Use full (with-background) preprocessed images
+        # Use images WITH fiducial markers for reconstruction
         image_paths = [
-            self.preprocessed_dir / v.image_filename
+            self.marked_dir / v.image_filename
             for v in self.job.views
         ]
 
@@ -252,7 +291,7 @@ class PipelineOrchestrator:
             if not p.exists():
                 raise PipelineError(
                     "coarse_recon",
-                    f"Preprocessed image not found: {p}",
+                    f"Marked image not found: {p}",
                 )
 
         try:
@@ -271,54 +310,102 @@ class PipelineOrchestrator:
             raise PipelineError("coarse_recon", str(e) or repr(e)) from e
 
     # ------------------------------------------------------------------
-    # Stage 4: Subject Isolation
+    # Stage 6: Subject Isolation (strip marker geometry)
     # ------------------------------------------------------------------
 
     def _stage_isolation(self) -> None:
-        """Remove background from images and filter 3D point cloud."""
+        """
+        Strip fiducial marker geometry from the 3D point cloud.
+
+        Since background was already removed in preprocessing, the main
+        job here is removing the reconstructed marker points so the
+        point cloud contains only the subject.
+        """
         self._update_status(JobStatus.SUBJECT_ISOLATION)
-        logger.info("Stage 4: Subject isolation (method=%s)", self.job.config.mask_method)
+        logger.info("Stage 6: Subject isolation (stripping marker geometry)")
 
         # Get point cloud path from coarse reconstruction
         ply_path = None
         if self.job.coarse_result and self.job.coarse_result.point_cloud.ply_path:
             ply_path = Path(self.job.coarse_result.point_cloud.ply_path)
 
-        try:
-            from pipelines.subject_isolation import run_subject_isolation
+        if ply_path is None or not ply_path.exists():
+            logger.warning("No point cloud to filter - skipping isolation")
+            return
 
-            result = run_subject_isolation(
-                image_dir=self.preprocessed_dir,
-                views=self.job.resolved_views,
-                point_cloud_path=ply_path,
-                output_dir=self.isolation_dir,
-                mask_method=self.job.config.mask_method,
+        try:
+            from pipelines.coarse_recon import read_ply, _write_ply
+            from pipelines.fiducial_markers import strip_markers_from_pointcloud
+
+            self.isolation_dir.mkdir(parents=True, exist_ok=True)
+
+            points, colors = read_ply(ply_path)
+            original_count = len(points)
+
+            # Remove marker geometry
+            filtered_points, filtered_colors = strip_markers_from_pointcloud(
+                points, colors
             )
-            self.job.isolation_result = result
+
+            # Write filtered point cloud
+            filtered_ply = self.isolation_dir / "filtered_pointcloud.ply"
+            _write_ply(filtered_ply, filtered_points, filtered_colors)
+
+            num_retained = len(filtered_points)
+            num_removed = original_count - num_retained
+
+            self.job.isolation_result = IsolationResult(
+                masked_image_paths=[
+                    str(self.preprocessed_dir / v.image_filename)
+                    for v in self.job.views
+                ],
+                filtered_ply_path=str(filtered_ply),
+                num_points_retained=num_retained,
+                num_points_removed=num_removed,
+            )
+
+            logger.info(
+                "Point cloud filtered: %d retained, %d removed (markers stripped)",
+                num_retained, num_removed,
+            )
 
         except Exception as e:
             raise PipelineError("subject_isolation", str(e) or repr(e)) from e
 
     # ------------------------------------------------------------------
-    # Stage 5: Trellis.2 Completion
+    # Stage 7: Trellis.2 Completion
     # ------------------------------------------------------------------
 
     def _stage_trellis(self) -> None:
-        """Run Trellis.2 generative completion on masked images."""
-        self._update_status(JobStatus.TRELLIS_COMPLETION)
-        logger.info("Stage 5: Trellis.2 completion")
+        """
+        Run Trellis.2 generative completion on CLEAN images (no markers).
 
-        if not self.job.isolation_result or not self.job.isolation_result.masked_image_paths:
-            raise PipelineError(
-                "trellis_completion",
-                "No masked images available from isolation stage.",
-            )
+        Uses the original preprocessed images (without fiducial markers)
+        so Trellis generates clean geometry without marker artifacts.
+        """
+        self._update_status(JobStatus.TRELLIS_COMPLETION)
+        logger.info("Stage 7: Trellis.2 completion (using clean images)")
+
+        # Use clean images from preprocessed_dir (no markers)
+        clean_image_paths = [
+            str(self.preprocessed_dir / v.image_filename)
+            for v in self.job.views
+        ]
+
+        # Verify clean images exist
+        for p_str in clean_image_paths:
+            p = Path(p_str)
+            if not p.exists():
+                raise PipelineError(
+                    "trellis_completion",
+                    f"Clean preprocessed image not found: {p}",
+                )
 
         try:
             from pipelines.trellis_completion import run_trellis_completion
 
             result = run_trellis_completion(
-                masked_image_paths=self.job.isolation_result.masked_image_paths,
+                masked_image_paths=clean_image_paths,
                 output_dir=self.trellis_dir,
                 device=self.device,
             )
@@ -327,15 +414,14 @@ class PipelineOrchestrator:
         except Exception as e:
             raise PipelineError("trellis_completion", str(e) or repr(e)) from e
 
-
     # ------------------------------------------------------------------
-    # Stage 6: Export
+    # Stage 8: Export
     # ------------------------------------------------------------------
 
     def _stage_export(self) -> None:
         """Export reconstruction results to GLB for downstream consumption."""
         self._update_status(JobStatus.EXPORTING)
-        logger.info("Stage 6: Exporting GLB mesh")
+        logger.info("Stage 8: Exporting GLB mesh")
 
         try:
             from pipelines.export import export_glb
@@ -344,7 +430,7 @@ class PipelineOrchestrator:
             logger.info("GLB exported: %s", glb_path)
 
         except Exception as e:
-            # Export failure is non-fatal – the job still has useful
+            # Export failure is non-fatal - the job still has useful
             # point cloud and isolation artifacts.
             logger.warning("GLB export failed (non-fatal): %s", e)
 
