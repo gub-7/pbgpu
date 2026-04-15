@@ -186,9 +186,12 @@ class DUSt3RBackend:
             mode=GlobalAlignerMode.PointCloudOptimizer,
         )
 
-        # Inject known camera priors if available
-        known_focals = [v.intrinsics.fx for v in resolved_views]
-        scene.preset_focal(known_focals)
+        # NOTE: We intentionally do NOT call scene.preset_focal().
+        # Our intrinsics define fx=1700 for 2048×2048 images, but DUSt3R
+        # internally resizes to ~512×384.  Presetting the unscaled focal
+        # would give DUSt3R a ~17° FOV (extreme telephoto) instead of the
+        # correct ~62°.  DUSt3R's own focal estimator is robust and will
+        # recover a correct focal from the images themselves.
 
         # Build known pose matrices (cam-to-world) for prior injection.
         # DUSt3R expects cam-to-world poses; our extrinsics store w2c,
