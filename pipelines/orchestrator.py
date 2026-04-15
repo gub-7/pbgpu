@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import time
+import traceback
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
@@ -128,7 +129,10 @@ class PipelineOrchestrator:
             self._update_status(JobStatus.COMPLETED)
 
         except PipelineError as e:
-            logger.error("Pipeline failed at stage %s: %s", e.stage, str(e))
+            logger.error(
+                "Pipeline failed at stage %s: %s\n%s",
+                e.stage, str(e), traceback.format_exc(),
+            )
             self._update_status(JobStatus.FAILED, error=str(e))
         except Exception as e:
             logger.exception("Unexpected pipeline error")
@@ -175,7 +179,7 @@ class PipelineOrchestrator:
             )
             self.job.views = updated_specs
         except Exception as e:
-            raise PipelineError("preprocessing", str(e)) from e
+            raise PipelineError("preprocessing", str(e) or repr(e)) from e
 
     # ------------------------------------------------------------------
     # Stage 2: Camera Initialisation
@@ -197,7 +201,7 @@ class PipelineOrchestrator:
             export_colmap_workspace(resolved, self.colmap_dir)
 
         except Exception as e:
-            raise PipelineError("camera_init", str(e)) from e
+            raise PipelineError("camera_init", str(e) or repr(e)) from e
 
     # ------------------------------------------------------------------
     # Stage 3: Coarse Reconstruction
@@ -243,7 +247,7 @@ class PipelineOrchestrator:
             self.job.coarse_result = result
 
         except Exception as e:
-            raise PipelineError("coarse_recon", str(e)) from e
+            raise PipelineError("coarse_recon", str(e) or repr(e)) from e
 
     # ------------------------------------------------------------------
     # Stage 4: Subject Isolation
@@ -272,7 +276,7 @@ class PipelineOrchestrator:
             self.job.isolation_result = result
 
         except Exception as e:
-            raise PipelineError("subject_isolation", str(e)) from e
+            raise PipelineError("subject_isolation", str(e) or repr(e)) from e
 
     # ------------------------------------------------------------------
     # Stage 5: Trellis.2 Completion
@@ -300,7 +304,7 @@ class PipelineOrchestrator:
             self.job.trellis_result = result
 
         except Exception as e:
-            raise PipelineError("trellis_completion", str(e)) from e
+            raise PipelineError("trellis_completion", str(e) or repr(e)) from e
 
 
     # ------------------------------------------------------------------

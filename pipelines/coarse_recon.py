@@ -208,13 +208,23 @@ class DUSt3RBackend:
             known_poses_c2w.append(c2w)
 
         # Inject known poses into the scene so DUSt3R treats them as fixed.
-        # This sets requires_grad=False on im_poses, which is what
-        # init_from_known_poses() checks via get_known_poses().
+        # preset_pose sets requires_grad=False on im_poses and
+        # norm_pw_scale=False, locking the cameras during optimisation.
         scene.preset_pose(known_poses_c2w)
 
-        # Run alignment optimisation with known-pose initialisation
+        # Use MST initialisation instead of known_poses.  The
+        # init_from_known_poses path requires ALL focals to also be
+        # preset (asserts nkf == n_imgs), but we intentionally skip
+        # preset_focal because our intrinsics are at 2048×2048 and
+        # DUSt3R internally resizes to ~512×384 — presetting the
+        # unscaled focal would produce a wildly wrong FOV.
+        #
+        # MST init still respects the preset poses: when nkp > 1 it
+        # rigidly aligns the spanning-tree solution to the known
+        # cameras, then the optimiser refines depth maps and focals
+        # while the camera poses stay frozen.
         loss = scene.compute_global_alignment(
-            init="known_poses",
+            init="mst",
             niter=300,
             schedule="cosine",
             lr=0.01,
