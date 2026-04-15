@@ -238,6 +238,15 @@ async def list_job_artifacts(job_id: str, subdir: str = ""):
     return {"job_id": job_id, "artifacts": artifacts}
 
 
+@app.head("/jobs/{job_id}/artifacts/{artifact_path:path}")
+async def head_artifact(job_id: str, artifact_path: str):
+    """Check whether a specific artifact file exists (HEAD only)."""
+    path = get_artifact_path(job_id, artifact_path)
+    if path is None:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+    return JSONResponse(content=None, status_code=200)
+
+
 @app.get("/jobs/{job_id}/artifacts/{artifact_path:path}")
 async def download_artifact(job_id: str, artifact_path: str):
     """Download a specific artifact file."""

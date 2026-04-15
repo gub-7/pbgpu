@@ -123,6 +123,8 @@ class PipelineOrchestrator:
                         "Trellis.2 completion unavailable, skipping: %s", e,
                     )
 
+            self._stage_export()
+
             self._update_status(JobStatus.COMPLETED)
 
         except PipelineError as e:
@@ -299,6 +301,27 @@ class PipelineOrchestrator:
 
         except Exception as e:
             raise PipelineError("trellis_completion", str(e)) from e
+
+
+    # ------------------------------------------------------------------
+    # Stage 6: Export
+    # ------------------------------------------------------------------
+
+    def _stage_export(self) -> None:
+        """Export reconstruction results to GLB for downstream consumption."""
+        self._update_status(JobStatus.EXPORTING)
+        logger.info("Stage 6: Exporting GLB mesh")
+
+        try:
+            from pipelines.export import export_glb
+
+            glb_path = export_glb(self.job_dir)
+            logger.info("GLB exported: %s", glb_path)
+
+        except Exception as e:
+            # Export failure is non-fatal – the job still has useful
+            # point cloud and isolation artifacts.
+            logger.warning("GLB export failed (non-fatal): %s", e)
 
 
 def run_pipeline(
