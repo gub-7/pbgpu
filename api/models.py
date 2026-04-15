@@ -33,6 +33,7 @@ class JobStatus(str, enum.Enum):
 
     PENDING = "pending"
     PREPROCESSING = "preprocessing"
+    VIEW_NORMALIZATION = "view_normalization"
     CAMERA_INIT = "camera_init"
     COARSE_RECON = "coarse_recon"
     SUBJECT_ISOLATION = "subject_isolation"

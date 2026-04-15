@@ -3,6 +3,7 @@ Pipeline orchestrator: coordinates the full reconstruction workflow.
 
 Stages executed in order:
   1. PREPROCESSING  – validate, resize, normalise input images
+  1b. VIEW_NORM    – cross-view subject size normalization
   2. CAMERA_INIT    – resolve canonical view poses to COLMAP extrinsics
   3. COARSE_RECON   – dense geometry from full images (WITH background)
   4. ISOLATION      – remove background from images + filter 3D points
@@ -110,6 +111,7 @@ class PipelineOrchestrator:
         """
         try:
             self._stage_preprocess()
+            self._stage_view_normalize()
             self._stage_camera_init()
             self._stage_coarse_recon()
             self._stage_isolation()
@@ -180,6 +182,25 @@ class PipelineOrchestrator:
             self.job.views = updated_specs
         except Exception as e:
             raise PipelineError("preprocessing", str(e) or repr(e)) from e
+
+    # ------------------------------------------------------------------
+    # Stage 1b: Cross-view subject normalization
+    # ------------------------------------------------------------------
+
+    def _stage_view_normalize(self) -> None:
+        """Normalize subject sizes across views for 3D consistency."""
+        self._update_status(JobStatus.VIEW_NORMALIZATION)
+        logger.info("Stage 1b: Cross-view subject normalization")
+
+        try:
+            from pipelines.view_normalization import normalize_views
+
+            normalize_views(
+                view_specs=self.job.views,
+                image_dir=self.preprocessed_dir,
+            )
+        except Exception as e:
+            raise PipelineError("view_normalization", str(e) or repr(e)) from e
 
     # ------------------------------------------------------------------
     # Stage 2: Camera Initialisation
